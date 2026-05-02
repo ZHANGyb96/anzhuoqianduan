@@ -1,0 +1,823 @@
+'use client';
+
+import { useEffect, useState, useRef, useCallback } from 'react';
+import * as LightweightCharts from 'lightweight-charts';
+import { Skeleton } from './ui/skeleton';
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AlertCircle, DatabaseZap, ChevronDown, Eye } from "lucide-react";
+import { API_URL, STOCKS } from '@/config/constants';
+import { useAuthStore } from '@/store/useAuthStore';
+import { calculateAllIndicators } from '@/utils/ta-math';
+import { isCapacitor } from '@/config/platform';
+import { getKlineFromMobileDB } from '@/lib/mobile-db';
+
+type CandlestickData    = LightweightCharts.SeriesDataItemTypeMap['Candlestick'];
+type LineData           = LightweightCharts.SeriesDataItemTypeMap['Line'];
+type IChartApi          = LightweightCharts.IChartApi;
+type ISeriesApi<T extends LightweightCharts.SeriesType> = LightweightCharts.ISeriesApi<T>;
+
+type RawKlineData = {
+    time: string;
+    open: number | null; high: number | null; low: number | null; close: number | null; volume: number | null;
+    ma5?: number|null; ma10?: number|null; ma20?: number|null; ma60?: number|null; ma120?: number|null; ma250?: number|null;
+    macd?: number|null; macd_signal?: number|null; macd_hist?: number|null;
+    kdj_k?: number|null; kdj_d?: number|null; kdj_j?: number|null;
+    rsi_6?: number|null; rsi_12?: number|null; rsi_24?: number|null;
+    trix?: number|null; trma?: number|null;
+    boll_upper?: number|null; boll_middle?: number|null; boll_lower?: number|null;
+    pdi?: number|null; mdi?: number|null; adx?: number|null; adxr?: number|null;
+    bias_6?: number|null; bias_12?: number|null; bias_24?: number|null;
+    bbi?: number|null; cci?: number|null; dpo?: number|null; madpo?: number|null;
+    lon?: number|null; lonma?: number|null;
+    vol_ma5?: number|null; vol_ma10?: number|null;
+};
+
+type FormattedChartData = CandlestickData & {
+    open: number; high: number; low: number; close: number; volume: number;
+    ma5?: number; ma10?: number; ma20?: number; ma60?: number; ma120?: number; ma250?: number;
+    macd?: number; macd_signal?: number; macd_hist?: number;
+    kdj_k?: number; kdj_d?: number; kdj_j?: number;
+    rsi_6?: number; rsi_12?: number; rsi_24?: number;
+    trix?: number; trma?: number;
+    boll_upper?: number; boll_middle?: number; boll_lower?: number;
+    pdi?: number; mdi?: number; adx?: number; adxr?: number;
+    bias_6?: number; bias_12?: number; bias_24?: number;
+    bbi?: number; cci?: number; dpo?: number; madpo?: number;
+    lon?: number; lonma?: number;
+    vol_ma5?: number; vol_ma10?: number;
+};
+
+export type IndicatorType = 'Volume'|'MACD'|'KDJ'|'RSI'|'TRIX'|'DMI'|'BIAS'|'BBI'|'CCI'|'DPO'|'BOLL'|'LON';
+
+export const indicatorList: { value: IndicatorType; label: string }[] = [
+    { value: 'Volume', label: '成交量' },
+    { value: 'MACD',   label: 'MACD'  },
+    { value: 'KDJ',    label: 'KDJ'   },
+    { value: 'RSI',    label: 'RSI'   },
+    { value: 'BOLL',   label: 'BOLL'  },
+    { value: 'TRIX',   label: 'TRIX'  },
+    { value: 'DPO',    label: 'DPO'   },
+    { value: 'BIAS',   label: 'BIAS'  },
+    { value: 'BBI',    label: 'BBI'   },
+    { value: 'CCI',    label: 'CCI'   },
+    { value: 'DMI',    label: 'DMI'   },
+    { value: 'LON',    label: 'LON'   },
+];
+
+const PERIOD_LABEL_MAP: Record<string, string> = {
+  '1m': '1分', '5m': '5分', '15m': '15分', '30m': '30分', '60m': '1时', '120m': '2时', '240m': '4时', '1d': '日线', '1w': '周线', '1M': '月线'
+};
+
+export const maConfig: Record<string, { color: string; label: string }> = {
+    ma5:  { color: '#F2A93B', label: 'MA5'  },
+    ma10: { color: '#31C2F2', label: 'MA10' },
+    ma20: { color: '#E85EFF', label: 'MA20' },
+    ma60: { color: '#44F279', label: 'MA60' },
+    ma120:{ color: '#FF6666', label: 'MA120'},
+    ma250:{ color: '#D4D4D4', label: 'MA250'},
+};
+
+const bollConfig  = { upper: { color: '#F2A93B' }, middle: { color: 'rgba(255,255,255,0.4)' }, lower: { color: '#31C2F2' } };
+const kdjConfig   = { k: { color: '#F2A93B', label: 'K' }, d: { color: '#31C2F2', label: 'D' }, j: { color: '#E85EFF', label: 'J' } };
+const rsiConfig   = { rsi1: { color: '#F2A93B', label: 'RSI1' }, rsi2: { color: '#31C2F2', label: 'RSI2' }, rsi3: { color: '#E85EFF', label: 'RSI3' } };
+const macdConfig  = { macd: { color: '#F2A93B', label: 'DIF' }, macd_signal: { color: '#31C2F2', label: 'DEA' }, macd_hist: { label: 'MACD' } };
+const trixConfig  = { trix: { color: '#F2A93B', label: 'TRIX' }, trma: { color: '#31C2F2', label: 'TRMA' } };
+const dmiConfig   = { pdi: { color: '#F2A93B', label: 'DI1' }, mdi: { color: '#31C2F2', label: 'DI2' }, adx: { color: '#E85EFF', label: 'ADX' }, adxr: { color: '#D4D4D4', label: 'ADXR' } };
+const biasConfig  = { bias6: { color: '#F2A93B', label: 'BIAS1' }, bias12: { color: '#31C2F2', label: 'BIAS2' }, bias24: { color: '#E85EFF', label: 'BIAS3' } };
+const bbiConfig   = { bbi: { color: '#D4D4D4', label: 'BBI' }, close: { color: 'rgba(255,255,255,0.4)', label: 'CLOSE' } };
+const cciConfig   = { cci: { color: '#D4D4D4', label: 'CCI' } };
+const dpoConfig   = { dpo: { color: '#F2A93B', label: 'DPO' }, madpo: { color: '#31C2F2', label: 'MADPO' } };
+const lonConfig   = { lon: { color: '#F2A93B', label: 'LONG' }, lonma: { color: '#31C2F2', label: 'MA' } };
+
+// ─────────────────────────────────────────────
+// Data fetching
+// ─────────────────────────────────────────────
+async function fetchKlineData(stockCode: string, period: string, token: string): Promise<RawKlineData[]> {
+    if (isCapacitor) {
+        try {
+            const rows = await getKlineFromMobileDB(stockCode, period, 5000);
+            return rows.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+        } catch (e: any) {
+            throw new Error('手机本地暂无此标的数据，请先在"数据管理"同步。');
+        }
+    }
+    const res = await fetch(`${API_URL}/api/v1/market-data/${stockCode}/kline?period=${period}&limit=10000`, {
+        headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body.message || '获取数据失败');
+    }
+    const data: any[] = await res.json();
+    return data.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+}
+
+function transformData(d: RawKlineData, period: string): FormattedChartData | null {
+    if (d.open == null || d.high == null || d.low == null || d.close == null || !d.time) return null;
+    const isDayPlus = period === '1d' || period === '1w' || period === '1M';
+    let finalTime: LightweightCharts.Time;
+    try {
+        if (isDayPlus) {
+            finalTime = d.time.split(' ')[0].split('T')[0];
+        } else {
+            const hasZ = /Z|[+-]\d{2}:?\d{2}$/.test(d.time);
+            const ts = Math.floor(new Date(hasZ ? d.time : d.time.replace(' ', 'T') + '+08:00').getTime() / 1000);
+            if (isNaN(ts)) throw new Error('NaN');
+            finalTime = ts as LightweightCharts.UTCTimestamp;
+        }
+    } catch { return null; }
+
+    return {
+        time: finalTime, open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume ?? 0,
+        ma5: d.ma5??undefined, ma10: d.ma10??undefined, ma20: d.ma20??undefined,
+        ma60: d.ma60??undefined, ma120: d.ma120??undefined, ma250: d.ma250??undefined,
+        macd: d.macd??undefined, macd_signal: d.macd_signal??undefined, macd_hist: d.macd_hist??undefined,
+        kdj_k: d.kdj_k??undefined, kdj_d: d.kdj_d??undefined, kdj_j: d.kdj_j??undefined,
+        rsi_6: d.rsi_6??undefined, rsi_12: d.rsi_12??undefined, rsi_24: d.rsi_24??undefined,
+        trix: d.trix??undefined, trma: d.trma??undefined,
+        boll_upper: d.boll_upper??undefined, boll_middle: d.boll_middle??undefined, boll_lower: d.boll_lower??undefined,
+        pdi: d.pdi??undefined, mdi: d.mdi??undefined, adx: d.adx??undefined, adxr: d.adxr??undefined,
+        bias_6: d.bias_6??undefined, bias_12: d.bias_12??undefined, bias_24: d.bias_24??undefined,
+        bbi: d.bbi??undefined, cci: d.cci??undefined, dpo: d.dpo??undefined, madpo: d.madpo??undefined,
+        lon: d.lon??undefined, lonma: d.lonma??undefined,
+        vol_ma5: d.vol_ma5??undefined, vol_ma10: d.vol_ma10??undefined,
+    };
+}
+
+const safeData = (data: FormattedChartData[], field: keyof FormattedChartData) =>
+    data.map(d => {
+        const v = d[field];
+        return (v != null && !isNaN(v as number)) ? { time: d.time, value: v as number } : { time: d.time };
+    });
+
+const sortMarkers = (m: LightweightCharts.SeriesMarker<LightweightCharts.Time>[]) =>
+    [...m].sort((a, b) => {
+        const tA = typeof a.time === 'string' ? new Date(a.time).getTime() : (a.time as number) * 1000;
+        const tB = typeof b.time === 'string' ? new Date(b.time).getTime() : (b.time as number) * 1000;
+        return tA - tB;
+    });
+
+function calcMacdDivergence(data: FormattedChartData[]) {
+    const markers: LightweightCharts.SeriesMarker<LightweightCharts.Time>[] = [];
+    if (data.length < 30) return markers;
+    let lastJc = -1, lastSc = -1, prevHH = -1, prevMHD = -1, prevLL = -1, prevMLD = -1;
+    for (let i = 1; i < data.length; i++) {
+        const pd = data[i-1], cd = data[i];
+        if (pd.macd==null||pd.macd_signal==null||cd.macd==null||cd.macd_signal==null) continue;
+        const isJC = pd.macd <= pd.macd_signal && cd.macd > cd.macd_signal;
+        const isSC = pd.macd >= pd.macd_signal && cd.macd < cd.macd_signal;
+        if (isSC && lastJc !== -1) {
+            const highs = data.slice(lastJc, i+1).map(d=>d.high).filter(Boolean) as number[];
+            const hists = data.slice(lastJc, i+1).map(d=>d.macd_hist).filter(v=>v!=null) as number[];
+            if (highs.length && hists.length) {
+                const hh = Math.max(...highs), mhd = Math.max(...hists);
+                if (prevHH !== -1 && hh > prevHH && mhd < prevMHD)
+                    markers.push({ time: cd.time, position: 'aboveBar', color: '#26a69a', shape: 'arrowDown', text: '顶背离' });
+                prevHH = hh; prevMHD = mhd;
+            }
+            lastSc = i;
+        }
+        if (isJC && lastSc !== -1) {
+            const lows  = data.slice(lastSc, i+1).map(d=>d.low).filter(Boolean) as number[];
+            const hists = data.slice(lastSc, i+1).map(d=>d.macd_hist).filter(v=>v!=null) as number[];
+            if (lows.length && hists.length) {
+                const ll = Math.min(...lows), mld = Math.min(...hists);
+                if (prevLL !== -1 && ll < prevLL && mld > prevMLD)
+                    markers.push({ time: cd.time, position: 'belowBar', color: '#ef5350', shape: 'arrowUp', text: '底背离' });
+                prevLL = ll; prevMLD = mld;
+            }
+            lastJc = i;
+        }
+        if (isJC) lastJc = i;
+        if (isSC) lastSc = i;
+    }
+    return markers;
+}
+
+function calcCrossSignals(
+    data: FormattedChartData[],
+    fastField: keyof FormattedChartData,
+    slowField: keyof FormattedChartData,
+) {
+    const markers: LightweightCharts.SeriesMarker<LightweightCharts.Time>[] = [];
+    for (let i = 1; i < data.length; i++) {
+        const pf = data[i-1][fastField] as number, ps = data[i-1][slowField] as number;
+        const cf = data[i][fastField]  as number, cs = data[i][slowField]  as number;
+        if (pf==null||ps==null||cf==null||cs==null) continue;
+        if (pf <= ps && cf > cs) markers.push({ time: data[i].time, position: 'belowBar', color: '#ef5350', shape: 'arrowUp',   text: '买' });
+        if (pf >= ps && cf < cs) markers.push({ time: data[i].time, position: 'aboveBar', color: '#26a69a', shape: 'arrowDown', text: '卖' });
+    }
+    return markers;
+}
+
+function calcBbiSignals(data: FormattedChartData[]) {
+    const markers: LightweightCharts.SeriesMarker<LightweightCharts.Time>[] = [];
+    for (let i = 1; i < data.length; i++) {
+        const pc = data[i-1].close, pb = data[i-1].bbi;
+        const cc = data[i].close,   cb = data[i].bbi;
+        if (pc==null||pb==null||cc==null||cb==null) continue;
+        if (pc <= pb && cc > cb) markers.push({ time: data[i].time, position: 'belowBar', color: '#ef5350', shape: 'arrowUp',   text: '买' });
+        if (pc >= pb && cc < cb) markers.push({ time: data[i].time, position: 'aboveBar', color: '#26a69a', shape: 'arrowDown', text: '卖' });
+    }
+    return markers;
+}
+
+const fmt  = (n?: number|null, p = 2) => n != null ? n.toFixed(p) : '–';
+const fmtV = (n?: number|null) => {
+    if (n == null) return '–';
+    if (n > 1e8)  return `${(n/1e8).toFixed(2)}亿`;
+    if (n > 1e4)  return `${(n/1e4).toFixed(2)}万`;
+    return n.toString();
+};
+const fmtTime = (t: LightweightCharts.Time, period: string) => {
+    if (typeof t === 'string') return t;
+    const d = new Date((t as number) * 1000);
+    const Y = d.getFullYear(), M = String(d.getMonth()+1).padStart(2,'0'), D = String(d.getDate()).padStart(2,'0');
+    const h = String(d.getHours()).padStart(2,'0'), m = String(d.getMinutes()).padStart(2,'0');
+    return (period === '1d' || period === '1w' || period === '1M') ? `${Y}/${M}/${D}` : `${Y}/${M}/${D} ${h}:${m}`;
+};
+
+function getPrimaryField(ind: IndicatorType): keyof FormattedChartData {
+    const map: Record<IndicatorType, keyof FormattedChartData> = {
+        Volume:'volume', MACD:'macd', KDJ:'kdj_k', RSI:'rsi_6',
+        TRIX:'trix', DMI:'pdi', BIAS:'bias_6', BBI:'bbi',
+        CCI:'cci', DPO:'dpo', BOLL:'boll_middle', LON:'lon',
+    };
+    return map[ind];
+}
+
+// ─────────────────────────────────────────────
+// Chart options factory
+// ─────────────────────────────────────────────
+function baseChartOpts(period: string): LightweightCharts.DeepPartial<LightweightCharts.ChartOptions> {
+    return {
+        layout:    { background: { type: LightweightCharts.ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af', fontSize: 10 },
+        grid:      { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { width: 1, color: 'rgba(255,255,255,0.25)', style: LightweightCharts.LineStyle.Dashed },
+            horzLine: { width: 1, color: 'rgba(255,255,255,0.25)', style: LightweightCharts.LineStyle.Dashed },
+        },
+        timeScale: {
+            borderColor: 'rgba(255,255,255,0.08)',
+            timeVisible: period !== '1d' && period !== '1w' && period !== '1M',
+            secondsVisible: false,
+            // ✅ 增大初始 barSpacing，K 线不再拥挤
+            barSpacing: 10,
+            minBarSpacing: 4,
+            fixLeftEdge: false,
+            lockVisibleTimeRangeOnResize: true,
+        },
+        rightPriceScale: {
+            borderColor: 'rgba(255,255,255,0.08)',
+            // 减小留白，让K线填满大部分空间
+            scaleMargins: { top: 0.02, bottom: 0.02 },
+            minimumWidth: 52, // 减小由72到52，修复K线过于偏左的问题，同时保留对齐效果
+        },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+        handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+        kineticScroll: { touch: true, mouse: false },
+        localization: { locale: 'zh-CN', dateFormat: 'yyyy/MM/dd' },
+    };
+}
+
+// ─────────────────────────────────────────────
+// KlineChart Component
+// ─────────────────────────────────────────────
+export function KlineChart({
+    stockCode, period, visibleMAs, indicatorPanes,
+    showDivergence, showTrixSignal, showDpoSignal, showBbiSignal,
+    toolbar
+}: {
+    stockCode: string; period: string;
+    visibleMAs: Record<string, boolean>; indicatorPanes: IndicatorType[];
+    showDivergence: boolean; showTrixSignal: boolean; showDpoSignal: boolean; showBbiSignal: boolean;
+    toolbar?: React.ReactNode;
+}) {
+    const token = useAuthStore(s => s.token);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    const [data,    setData   ] = useState<FormattedChartData[]>([]);
+    const [dataMap, setDataMap] = useState(new Map<LightweightCharts.Time, FormattedChartData>());
+    const [loading, setLoading] = useState(true);
+    const [error,   setError  ] = useState<string | null>(null);
+    const [renderError, setRenderError] = useState<string | null>(null);
+    const [debugInfo, setDebugInfo] = useState<string>('');
+    const [legend,  setLegend ] = useState<FormattedChartData | null>(null);
+
+    const stockLabel = STOCKS.find(s => s.value === stockCode)?.label || stockCode;
+
+    // ─── 1. Data loading ───────────────────────────────────────────
+    useEffect(() => {
+        let alive = true;
+        async function load() {
+            if (!token && !isCapacitor) return;
+            if (!stockCode) { setData([]); setDataMap(new Map()); setLegend(null); setError(null); setLoading(false); return; }
+            setLoading(true); setError(null); setData([]); setDataMap(new Map()); setLegend(null);
+            try {
+                const raw = await fetchKlineData(stockCode, period, token || '');
+                if (!alive) return;
+                if (!raw.length) { setData([]); setLoading(false); return; }
+                let transformed = raw.map(d => transformData(d, period)).filter((d): d is FormattedChartData => d !== null);
+                
+                // 去重，由于 lightweight-charts 不允许存在重复时间戳
+                const uniqueMap = new Map();
+                transformed.forEach(d => uniqueMap.set(d.time, d));
+                transformed = Array.from(uniqueMap.values());
+                
+                transformed.sort((a, b) => {
+                    const tA = typeof a.time==='string' ? new Date(a.time).getTime() : (a.time as number);
+                    const tB = typeof b.time==='string' ? new Date(b.time).getTime() : (b.time as number);
+                    return tA - tB;
+                });
+                transformed = calculateAllIndicators(transformed as any) as FormattedChartData[];
+                const map = new Map<LightweightCharts.Time, FormattedChartData>();
+                transformed.forEach(d => map.set(d.time, d));
+                setData(transformed); setDataMap(map);
+                setLegend(transformed[transformed.length - 1] ?? null);
+            } catch (e: any) {
+                if (alive) setError(e.message);
+            } finally {
+                if (alive) setLoading(false);
+            }
+        }
+        load();
+        return () => { alive = false; };
+    }, [stockCode, period, token]);
+
+    // ─── 2. Chart rendering (rAF 延迟，等 flex 布局完成) ──────────
+    useEffect(() => {
+        if (loading || error || !data.length || !containerRef.current) return;
+
+        let disposed = false;
+        let initialized = false; 
+        let rafHandle: number;
+        let retryCount = 0;
+        const MAX_RETRY = 60;    
+
+        let allCharts: IChartApi[] = [];
+        let ro: ResizeObserver | null = null;
+        let syncRafId: number | null = null;
+
+        const initChart = () => {
+            try {
+                // 如果组件已卸载、或已初始化成功、或容器丢失，直接终止
+                if (disposed || initialized || !containerRef.current) return;
+
+                const root   = containerRef.current;
+                const mainEl = root.querySelector<HTMLDivElement>('[data-pane="main"]');
+                const indEls = indicatorPanes
+                    .map((_, i) => root.querySelector<HTMLDivElement>(`[data-pane="ind-${i}"]`))
+                    .filter(Boolean) as HTMLDivElement[];
+                    
+                if (!mainEl || indEls.length !== indicatorPanes.length) return;
+                
+                // 🔥 核心逻辑：获取尺寸并验证
+                const { clientWidth, clientHeight } = mainEl;
+                
+                if (!clientWidth || !clientHeight) {
+                    if (retryCount++ > MAX_RETRY) {
+                        console.warn('Chart init aborted: container size still 0 after 60 frames.');
+                        setDebugInfo(`布局失败: 容器高度为 0`);
+                        return; // 放弃治疗，防止死循环烧烂 CPU
+                    }
+                    setDebugInfo(`Waiting layout... ${retryCount}/${MAX_RETRY}`);
+                    rafHandle = requestAnimationFrame(initChart);
+                    return; 
+                }
+
+                // 走到这里，说明拿到了真实宽高，立刻加锁！
+                initialized = true;
+                setDebugInfo(`root: ${root.clientHeight}px, mainEl: ${mainEl.clientHeight}px`);
+
+                const sopts = { lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false, lineWidth: 1 as 1 };
+
+                // ── Main chart ──
+                const mainChart = LightweightCharts.createChart(mainEl, {
+                    ...baseChartOpts(period),
+                    width:  clientWidth,
+                    height: clientHeight,
+                    timeScale: {
+                        ...baseChartOpts(period).timeScale,
+                        visible: indEls.length === 0, 
+                    }
+                });
+                const candleSeries = mainChart.addCandlestickSeries({
+                    upColor: '#ef5350', downColor: '#26a69a', borderVisible: false,
+                    wickUpColor: '#ef5350', wickDownColor: '#26a69a',
+                });
+                candleSeries.setData(data);
+
+                // MA lines
+                Object.keys(maConfig).forEach(key => {
+                    if (visibleMAs[key]) {
+                        const s = mainChart.addLineSeries({ color: maConfig[key].color, ...sopts });
+                        s.setData(safeData(data, key as keyof FormattedChartData));
+                    }
+                });
+                if (showDivergence) candleSeries.setMarkers(sortMarkers(calcMacdDivergence(data)));
+
+                // ── Indicator charts ──
+                // ✅ 副图时间轴隐藏（只有最后一个副图才显示时间轴刻度）
+                const indCharts: IChartApi[] = indEls.map((el, idx) => {
+                    const isLast = idx === indEls.length - 1;
+                    return LightweightCharts.createChart(el, {
+                        ...baseChartOpts(period),
+                        width:  el.clientWidth,
+                        height: el.clientHeight,
+                        // ✅ 非最后一个副图隐藏时间轴刻度文字，节省垂直空间
+                        timeScale: {
+                            ...baseChartOpts(period).timeScale,
+                            visible: isLast,
+                        },
+                        // 减小指标图表上下留白
+                        rightPriceScale: {
+                            ...baseChartOpts(period).rightPriceScale,
+                            scaleMargins: { top: 0.02, bottom: 0.02 },
+                        },
+                    });
+                });
+
+                const drawIndicator = (chart: IChartApi, ind: IndicatorType): ISeriesApi<any> | null => {
+                    let primary: ISeriesApi<any> | null = null;
+                    switch (ind) {
+                        case 'Volume': {
+                            const s = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts });
+                            s.setData(data.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(239,83,80,0.7)' : 'rgba(38,166,154,0.7)' })));
+                            if (data[0]?.vol_ma5 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma5.color, lineWidth: 1 }).setData(safeData(data, 'vol_ma5'));
+                            if (data[0]?.vol_ma10 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(data, 'vol_ma10'));
+                            primary = s; break;
+                        }
+                        case 'MACD': {
+                            primary = chart.addLineSeries({ ...sopts, color: macdConfig.macd.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'macd'));
+                            chart.addLineSeries({ ...sopts, color: macdConfig.macd_signal.color, lineWidth: 1 }).setData(safeData(data, 'macd_signal'));
+                            chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts })
+                                 .setData(data.map(d => ({ time: d.time, value: d.macd_hist, color: (d.macd_hist||0) >= 0 ? '#ef5350' : '#26a69a' })));
+                            break;
+                        }
+                        case 'KDJ': {
+                            primary = chart.addLineSeries({ ...sopts, color: kdjConfig.k.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'kdj_k'));
+                            chart.addLineSeries({ ...sopts, color: kdjConfig.d.color, lineWidth: 1 }).setData(safeData(data, 'kdj_d'));
+                            chart.addLineSeries({ ...sopts, color: kdjConfig.j.color, lineWidth: 1 }).setData(safeData(data, 'kdj_j'));
+                            [20, 80].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            break;
+                        }
+                        case 'RSI': {
+                            primary = chart.addLineSeries({ ...sopts, color: rsiConfig.rsi1.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'rsi_6'));
+                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi2.color, lineWidth: 1 }).setData(safeData(data, 'rsi_12'));
+                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi3.color, lineWidth: 1 }).setData(safeData(data, 'rsi_24'));
+                            [30, 70].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            break;
+                        }
+                        case 'TRIX': {
+                            primary = chart.addLineSeries({ ...sopts, color: trixConfig.trix.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'trix'));
+                            if (showTrixSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(data, 'trix', 'trma')));
+                            chart.addLineSeries({ ...sopts, color: trixConfig.trma.color, lineWidth: 1 }).setData(safeData(data, 'trma'));
+                            break;
+                        }
+                        case 'DMI': {
+                            primary = chart.addLineSeries({ ...sopts, color: dmiConfig.pdi.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'pdi'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.mdi.color,  lineWidth: 1 }).setData(safeData(data, 'mdi'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.adx.color,  lineWidth: 1 }).setData(safeData(data, 'adx'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.adxr.color, lineWidth: 1 }).setData(safeData(data, 'adxr'));
+                            break;
+                        }
+                        case 'BIAS': {
+                            primary = chart.addLineSeries({ ...sopts, color: biasConfig.bias6.color,  lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'bias_6'));
+                            chart.addLineSeries({ ...sopts, color: biasConfig.bias12.color, lineWidth: 1 }).setData(safeData(data, 'bias_12'));
+                            chart.addLineSeries({ ...sopts, color: biasConfig.bias24.color, lineWidth: 1 }).setData(safeData(data, 'bias_24'));
+                            break;
+                        }
+                        case 'BBI': {
+                            primary = chart.addLineSeries({ ...sopts, color: bbiConfig.bbi.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'bbi'));
+                            if (showBbiSignal) (primary as any).setMarkers(sortMarkers(calcBbiSignals(data)));
+                            chart.addLineSeries({ ...sopts, color: bbiConfig.close.color, lineWidth: 1 }).setData(safeData(data, 'close'));
+                            break;
+                        }
+                        case 'CCI': {
+                            primary = chart.addLineSeries({ ...sopts, color: cciConfig.cci.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'cci'));
+                            [-100, 100].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.5)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            break;
+                        }
+                        case 'DPO': {
+                            primary = chart.addLineSeries({ ...sopts, color: dpoConfig.dpo.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'dpo'));
+                            if (showDpoSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(data, 'dpo', 'madpo')));
+                            chart.addLineSeries({ ...sopts, color: dpoConfig.madpo.color, lineWidth: 1 }).setData(safeData(data, 'madpo'));
+                            break;
+                        }
+                        case 'BOLL': {
+                            const cs2 = chart.addCandlestickSeries({ upColor: '#ef5350', downColor: '#26a69a', borderVisible: false, wickUpColor: '#ef5350', wickDownColor: '#26a69a' });
+                            cs2.setData(data);
+                            chart.addLineSeries({ ...sopts, color: bollConfig.upper.color,  lineWidth: 1 }).setData(safeData(data, 'boll_upper'));
+                            chart.addLineSeries({ ...sopts, color: bollConfig.middle.color, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 }).setData(safeData(data, 'boll_middle'));
+                            chart.addLineSeries({ ...sopts, color: bollConfig.lower.color,  lineWidth: 1 }).setData(safeData(data, 'boll_lower'));
+                            chart.addLineSeries({ ...sopts, color: maConfig.ma5.color,  lineWidth: 1 }).setData(safeData(data, 'ma5'));
+                            chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(data, 'ma10'));
+                            primary = cs2; break;
+                        }
+                        case 'LON': {
+                            primary = chart.addLineSeries({ ...sopts, color: lonConfig.lon.color, lineWidth: 1 });
+                            (primary as any).setData(safeData(data, 'lon'));
+                            chart.addLineSeries({ ...sopts, color: lonConfig.lonma.color, lineWidth: 1 }).setData(safeData(data, 'lonma'));
+                            chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts })
+                                 .setData(data.map(d => ({ time: d.time, value: d.lon, color: (d.lon||0) >= 0 ? '#ef5350' : '#26a69a' })));
+                            break;
+                        }
+                    }
+                    return primary;
+                };
+
+                const indSeries = indicatorPanes.map((ind, i) => drawIndicator(indCharts[i], ind));
+                allCharts = [mainChart, ...indCharts];
+
+                // ─── Cross-chart sync with rAF debounce ───
+                let syncingRange = false;
+                const syncGroup = [
+                    { chart: mainChart, series: candleSeries, field: 'close' as keyof FormattedChartData },
+                    ...indicatorPanes.map((ind, i) => ({ chart: indCharts[i], series: indSeries[i], field: getPrimaryField(ind) })),
+                ];
+
+                allCharts.forEach(chart => {
+                    chart.subscribeCrosshairMove(param => {
+                        if (syncRafId) cancelAnimationFrame(syncRafId);
+                        syncRafId = requestAnimationFrame(() => {
+                            if (!param.point || !param.time) {
+                                if (data.length) setLegend(data[data.length - 1]);
+                                syncGroup.forEach(g => { if (g.chart !== chart) g.chart.clearCrosshairPosition(); });
+                                return;
+                            }
+                            const dp = dataMap.get(param.time);
+                            if (dp) setLegend(dp);
+                            syncGroup.forEach(g => {
+                                if (g.chart === chart || !g.series) return;
+                                const price = dp?.[g.field];
+                                if (price != null && !isNaN(price as number))
+                                    g.chart.setCrosshairPosition(price as number, param.time!, g.series);
+                                else
+                                    g.chart.clearCrosshairPosition();
+                            });
+                        });
+                    });
+
+                    chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+                        if (syncingRange || !range) return;
+                        syncingRange = true;
+                        allCharts.forEach(c => { if (c !== chart) c.timeScale().setVisibleLogicalRange(range); });
+                        syncingRange = false;
+                    });
+                });
+
+                // ─── ResizeObserver — 处理后续尺寸变化 ───
+                const elMap = new Map<Element, IChartApi>();
+                elMap.set(mainEl, mainChart);
+                indEls.forEach((el, i) => elMap.set(el, indCharts[i]));
+                
+                ro = new ResizeObserver(entries => {
+                    requestAnimationFrame(() => {
+                        entries.forEach(entry => {
+                            const c = elMap.get(entry.target);
+                            if (c) {
+                                // 防小数模糊，防 0 尺寸崩溃
+                                const width = Math.floor(entry.contentRect.width);
+                                const height = Math.floor(entry.contentRect.height);
+                                if (width > 0 && height > 0) {
+                                    c.applyOptions({ width, height });
+                                }
+                            }
+                        });
+                    });
+                });
+                [mainEl, ...indEls].forEach(el => ro!.observe(el));
+                
+            } catch (err: any) {
+                console.error("Chart render error:", err);
+                setRenderError(err.message || '图表渲染错误');
+            }
+        };
+        rafHandle = requestAnimationFrame(initChart);
+
+        return () => {
+            disposed = true; // 通知正在跑的轮询赶紧停下
+            if (rafHandle) cancelAnimationFrame(rafHandle);
+            if (syncRafId) cancelAnimationFrame(syncRafId);
+            if (ro) ro.disconnect();
+            allCharts.forEach(c => c.remove());
+        };
+    }, [data, loading, error, period, indicatorPanes, visibleMAs, dataMap,
+        showDivergence, showTrixSignal, showDpoSignal, showBbiSignal]);
+
+    // ─── Render ────────────────────────────────────────────────────
+    if (loading) return <Skeleton className="h-full w-full bg-transparent" />;
+    if (error)   return <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>错误</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>;
+    if (!stockCode || !data.length) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center text-muted-foreground">
+                <DatabaseZap className="h-10 w-10 mb-3" />
+                <p className="text-sm font-medium">暂无数据</p>
+                <p className="text-xs mt-1 opacity-60">请在"数据管理"同步后查看</p>
+            </div>
+        );
+    }
+
+    const changeVal = legend ? legend.close - legend.open : 0;
+    const changePct = legend?.open ? (changeVal / legend.open) * 100 : 0;
+    const isUp = changeVal >= 0;
+
+    // ── Compact top legend (like trading apps) ─────────────────────
+    const TopLegend = () => {
+        if (!legend) return null;
+        return (
+            <div className="flex flex-col px-2 py-1.5 select-none border-b border-white/5 flex-shrink-0 bg-[#17191C]">
+                <div className="flex items-center justify-between w-full">
+                    {/* Left: Big Price & Change */}
+                    <div className={`flex flex-col shrink-0 ${isUp ? 'text-[#ef5350]' : 'text-[#26a69a]'}`}>
+                        <div className="text-[24px] font-bold font-mono leading-none">{fmt(legend.close)}</div>
+                        <div className="flex items-center gap-2 text-[11px] font-mono mt-1 font-semibold">
+                            <span>{isUp ? '+' : ''}{fmt(changeVal)}</span>
+                            <span>{isUp ? '+' : ''}{fmt(changePct)}%</span>
+                        </div>
+                    </div>
+                    {/* Center & Right: Grid of details */}
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground flex-1 ml-4 justify-items-end">
+                        <div className="flex justify-between items-center w-full max-w-[100px]">
+                            <span className="shrink-0 mr-1 opacity-70">高</span>
+                            <span className="font-mono text-[#ef5350] truncate font-semibold">{fmt(legend.high)}</span>
+                        </div>
+                        <div className="flex justify-between items-center w-full max-w-[100px]">
+                            <span className="shrink-0 mr-1 opacity-70">低</span>
+                            <span className="font-mono text-[#26a69a] truncate font-semibold">{fmt(legend.low)}</span>
+                        </div>
+                        <div className="flex justify-between items-center w-full max-w-[100px]">
+                            <span className="shrink-0 mr-1 opacity-70">开</span>
+                            <span className="font-mono text-foreground truncate">{fmt(legend.open)}</span>
+                        </div>
+                        <div className="flex justify-between items-center w-full max-w-[100px]">
+                            <span className="shrink-0 mr-1 opacity-70">量</span>
+                            <span className="font-mono text-foreground truncate">{fmtV(legend.volume)}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    if (renderError) {
+        return (
+            <div className="flex flex-col h-full items-center justify-center p-4">
+                <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>图表渲染失败</AlertTitle>
+                    <AlertDescription className="break-all">{renderError}</AlertDescription>
+                </Alert>
+                <div className="text-xs mt-4 text-muted-foreground whitespace-pre-wrap">{debugInfo}</div>
+            </div>
+        );
+    }
+
+    // ── Compact indicator legend ───────────────────────────────────
+    const IndLegend = ({ ind }: { ind: IndicatorType }) => {
+        if (!legend) return null;
+        const row = (items: [string, string, number|undefined][]) => (
+            <div className="flex items-center gap-2 text-[10px] ml-1">
+                {items.map(([label, color, val]) => (
+                    <span key={label} style={{ color }}>{label}:{fmt(val)}</span>
+                ))}
+            </div>
+        );
+        switch (ind) {
+            case 'Volume': return <span className="text-[10px] text-muted-foreground ml-1">量:{fmtV(legend.volume)}</span>;
+            case 'MACD':   return row([['MACD', '#ef5350', legend.macd_hist], ['DIFF', macdConfig.macd.color, legend.macd], ['DEA', macdConfig.macd_signal.color, legend.macd_signal]]);
+            case 'KDJ':    return row([['K', kdjConfig.k.color, legend.kdj_k], ['D', kdjConfig.d.color, legend.kdj_d], ['J', kdjConfig.j.color, legend.kdj_j]]);
+            case 'RSI':    return row([['RSI1', rsiConfig.rsi1.color, legend.rsi_6], ['RSI2', rsiConfig.rsi2.color, legend.rsi_12], ['RSI3', rsiConfig.rsi3.color, legend.rsi_24]]);
+            case 'TRIX':   return row([['TRIX', trixConfig.trix.color, legend.trix], ['TRMA', trixConfig.trma.color, legend.trma]]);
+            case 'DMI':    return row([['DI1', dmiConfig.pdi.color, legend.pdi], ['DI2', dmiConfig.mdi.color, legend.mdi], ['ADX', dmiConfig.adx.color, legend.adx], ['ADXR', dmiConfig.adxr.color, legend.adxr]]);
+            case 'BIAS':   return row([['B1', biasConfig.bias6.color, legend.bias_6], ['B2', biasConfig.bias12.color, legend.bias_12], ['B3', biasConfig.bias24.color, legend.bias_24]]);
+            case 'BBI':    return row([['BBI', bbiConfig.bbi.color, legend.bbi]]);
+            case 'CCI':    return row([['CCI', cciConfig.cci.color, legend.cci]]);
+            case 'DPO':    return row([['DPO', dpoConfig.dpo.color, legend.dpo], ['MA', dpoConfig.madpo.color, legend.madpo]]);
+            case 'BOLL':   return row([['UP', bollConfig.upper.color, legend.boll_upper], ['MID', bollConfig.middle.color, legend.boll_middle], ['LO', bollConfig.lower.color, legend.boll_lower]]);
+            case 'LON':    return row([['LON', lonConfig.lon.color, legend.lon], ['MA', lonConfig.lonma.color, legend.lonma]]);
+            default: return null;
+        }
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    //  ✅ 布局比例 — 仿东方财富 / 同花顺专业格局
+    //
+    //  主图永远是最大区块，副图紧凑排列在下方：
+    //    0 副图 → 主图占满
+    //    1 副图 → 主图 ~65%  副图 ~35%
+    //    2 副图 → 主图 ~57%  每副图 ~21%   (默认: 成交量 + MACD)
+    //    3 副图 → 主图 ~52%  每副图 ~16%
+    //
+    //  每个副图强制 min-height 64px，防止高度塌陷
+    // ─────────────────────────────────────────────────────────────
+    const indCount = indicatorPanes.length;
+    // flex grow 权重：主图(K线)占屏幕的三分之二(2份)，副图共占三分之一(1份)
+    const MAIN_FLEX  = indCount > 0 ? 3 : 1;   // K线主图权重提升
+    const IND_FLEX   = 1;                        // 每个副图固定权重1，不再缩减
+    const MAIN_MIN_H = 160;  // 原来 80px，太小，min-height 导致 flex 塌陷
+    const IND_MIN_H  = 80;
+    const MAIN_LABEL_H = 34; // 两行文本需要更多高度
+    const IND_LABEL_H = 20;
+
+    return (
+        <div ref={containerRef} className="flex flex-col flex-1 min-h-0 w-full overflow-hidden bg-[#17191C]">
+
+            {/* ① OHLCV 价格信息栏 */}
+            <TopLegend />
+
+            {/* ② 周期切换工具栏 */}
+            {toolbar}
+
+            {/* ③ 主图区块（K 线 + 均线叠加层） */}
+            <div
+                className="relative w-full border-b"
+                style={{
+                    flex: `${MAIN_FLEX} 1 0%`,
+                    minHeight: `${MAIN_MIN_H}px`,
+                    borderColor: 'rgba(255,255,255,0.08)'
+                }}
+            >
+                {/* MA 图例标签行 —— 绝对定位覆盖在上方 */}
+                <div
+                    className="absolute top-0 left-0 right-0 z-20 flex flex-col justify-center px-1.5 select-none bg-[#17191C] text-[10px] gap-y-0.5 border-b border-white/5 pointer-events-none"
+                    style={{ height: `${MAIN_LABEL_H}px` }}
+                >
+                    <div className="flex flex-wrap items-center justify-between text-muted-foreground w-full">
+                        <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
+                                MA <ChevronDown className="h-3 w-3" />
+                            </span>
+                            <span>{legend ? fmtTime(legend.time, period) : ''}</span>
+                            <span>{PERIOD_LABEL_MAP[period] || period}</span>
+                        </div>
+                        <div className="flex items-center pointer-events-auto cursor-pointer">
+                            <Eye className="h-3 w-3" />
+                        </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 text-[10px]">
+                        <span className="text-muted-foreground font-semibold">MA</span>
+                        {legend && Object.entries(maConfig).map(([k, c]) =>
+                            visibleMAs[k] && (
+                                <span key={k} style={{ color: c.color }}>
+                                    {c.label.replace('MA', '')}:{fmt(legend[k as keyof FormattedChartData] as number, 2)}
+                                </span>
+                            )
+                        )}
+                    </div>
+                </div>
+
+                {/* 主图 canvas 容器 —— 在标签下方 */}
+                <div
+                    data-pane="main"
+                    className="absolute left-0 right-0 bottom-0"
+                    style={{ top: `${MAIN_LABEL_H}px` }}
+                />
+            </div>
+
+            {/* ④ 副图区块列表 */}
+            {indicatorPanes.map((ind, i) => (
+                <div
+                    key={`${ind}-${i}`}
+                    className="relative w-full border-t"
+                    style={{
+                        flex: `${IND_FLEX} 1 0%`,
+                        minHeight: `${IND_MIN_H}px`,
+                        borderColor: 'rgba(255,255,255,0.08)'
+                    }}
+                >
+                    {/* 副图标题 + 指标数值行 */}
+                    <div
+                        className="absolute top-0 left-0 right-0 z-20 flex items-center flex-wrap gap-1 px-1.5 select-none bg-[#17191C] text-[10px] pointer-events-none"
+                        style={{ height: `${IND_LABEL_H}px` }}
+                    >
+                        <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
+                            {ind} <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                        </span>
+                        <span className="text-muted-foreground ml-1">
+                            {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ''}
+                        </span>
+                        <IndLegend ind={ind} />
+                    </div>
+
+                    {/* 副图 canvas 容器 */}
+                    <div
+                        data-pane={`ind-${i}`}
+                        className="absolute left-0 right-0 bottom-0"
+                        style={{ top: `${IND_LABEL_H}px` }}
+                    />
+                </div>
+            ))}
+        </div>
+    );
+}

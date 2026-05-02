@@ -1,0 +1,21 @@
+{
+  "name": "AlphaScan AI",
+  "short_name": "AlphaScan",
+  "description": "专业级股票期货量化回测与分析系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#17191C",
+  "theme_color": "#4D4FFF",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

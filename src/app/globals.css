@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222.2 84% 4.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 84% 4.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 84% 4.9%;
+  --primary: 222.2 47.4% 11.2%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 210 40% 96.1%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 210 40% 96.1%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 91.4%;
+  --ring: 222.2 84% 4.9%;
+  --radius: 0.5rem;
+  /* 底部导航高度（移动端用） */
+  --bottom-nav-height: 64px;
+}
+
+.dark {
+  --background: 220 13% 10%;
+  --foreground: 210 40% 98%;
+  --card: 220 13% 10%;
+  --card-foreground: 210 40% 98%;
+  --popover: 220 13% 10%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 240 100% 65%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 217 33% 17%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 187 100% 73%;
+  --accent-foreground: 222 47% 11%;
+  --destructive: 0 63% 31%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217 33% 17%;
+  --input: 217 33% 17%;
+  --ring: 240 100% 65%;
+  --sidebar-background: 224 20% 13%;
+  --sidebar-foreground: 210 40% 98%;
+  --sidebar-primary: 240 100% 65%;
+  --sidebar-primary-foreground: 210 40% 98%;
+  --sidebar-accent: 217 33% 17%;
+  --sidebar-accent-foreground: 210 40% 98%;
+  --sidebar-border: 217 33% 17%;
+  --sidebar-ring: 240 100% 65%;
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-body), sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 禁止 App 模式下的过度滚动和系统手势干扰 */
+  overscroll-behavior-y: contain;
+  /* 支持 Android 刘海/打孔屏与手势条安全区 */
+  padding-top: env(safe-area-inset-top);
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+/* 移动端主内容区：底部留出 Tab 导航 + 手势条高度 */
+@media (max-width: 767px) {
+  .mobile-main-content {
+    padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 8px));
+  }
+}
+
+/* 底部导航栏安全区适配 */
+.bottom-nav-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* App 化体验优化：禁止文字选中和移动端长按菜单 */
+@media (max-width: 768px) {
+  .no-select {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* 触控目标最小尺寸保障（WCAG 2.5.5 & Android 指南 ≥ 48dp） */
+@media (max-width: 767px) {
+  button,
+  a,
+  [role="button"],
+  [role="tab"],
+  [role="menuitem"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* 强制隐藏 Lightweight Charts 注入的 TradingView 版权 Logo */
+div a[href*="tradingview.com"],
+div a[href*="tradingview"] {
+    display: none !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    z-index: -9999 !important;
+}
+
+/* 横向滚动隐藏滚动条（period tabs） */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
