@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, memo } from 'react';
 import * as LightweightCharts from 'lightweight-charts';
 import { Skeleton } from './ui/skeleton';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -282,6 +282,153 @@ function baseChartOpts(period: string): LightweightCharts.DeepPartial<Lightweigh
 }
 
 // ─────────────────────────────────────────────
+// Legend Components (Memoized for Crosshair Performance)
+// ─────────────────────────────────────────────
+const MAIN_LABEL_H = 34;
+const IND_LABEL_H = 20;
+
+const TopLegend = memo(({ legendDataRef, updateLegendUIs }: { legendDataRef: React.MutableRefObject<FormattedChartData | null>, updateLegendUIs: React.MutableRefObject<Set<() => void>> }) => {
+    const [, forceRender] = useState(0);
+
+    useEffect(() => {
+        const cb = () => forceRender(prev => prev + 1);
+        updateLegendUIs.current.add(cb);
+        return () => { updateLegendUIs.current.delete(cb); };
+    }, [updateLegendUIs]);
+
+    const currentLegend = legendDataRef.current;
+    if (!currentLegend) return null;
+
+    const changeVal = currentLegend.close - currentLegend.open;
+    const changePct = currentLegend.open ? (changeVal / currentLegend.open) * 100 : 0;
+    const isUp = changeVal >= 0;
+
+    return (
+        <div className="flex flex-col px-2 py-1.5 select-none border-b border-white/5 flex-shrink-0 bg-[#17191C]">
+            <div className="flex items-center justify-between w-full">
+                <div className={`flex flex-col shrink-0 ${isUp ? 'text-[#ef5350]' : 'text-[#26a69a]'}`}>
+                    <div className="text-[24px] font-bold font-mono leading-none">{fmt(currentLegend.close)}</div>
+                    <div className="flex items-center gap-2 text-[11px] font-mono mt-1 font-semibold">
+                        <span>{isUp ? '+' : ''}{fmt(changeVal)}</span>
+                        <span>{isUp ? '+' : ''}{fmt(changePct)}%</span>
+                    </div>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground flex-1 ml-4 justify-items-end">
+                    <div className="flex justify-between items-center w-full max-w-[100px]">
+                        <span className="shrink-0 mr-1 opacity-70">高</span>
+                        <span className="font-mono text-[#ef5350] truncate font-semibold">{fmt(currentLegend.high)}</span>
+                    </div>
+                    <div className="flex justify-between items-center w-full max-w-[100px]">
+                        <span className="shrink-0 mr-1 opacity-70">低</span>
+                        <span className="font-mono text-[#26a69a] truncate font-semibold">{fmt(currentLegend.low)}</span>
+                    </div>
+                    <div className="flex justify-between items-center w-full max-w-[100px]">
+                        <span className="shrink-0 mr-1 opacity-70">开</span>
+                        <span className="font-mono text-foreground truncate">{fmt(currentLegend.open)}</span>
+                    </div>
+                    <div className="flex justify-between items-center w-full max-w-[100px]">
+                        <span className="shrink-0 mr-1 opacity-70">量</span>
+                        <span className="font-mono text-foreground truncate">{fmtV(currentLegend.volume)}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+});
+
+const MaLegend = memo(({ legendDataRef, updateLegendUIs, period, visibleMAs }: { legendDataRef: React.MutableRefObject<FormattedChartData | null>, updateLegendUIs: React.MutableRefObject<Set<() => void>>, period: string, visibleMAs: Record<string, boolean> }) => {
+    const [, forceRender] = useState(0);
+
+    useEffect(() => {
+        const cb = () => forceRender(prev => prev + 1);
+        updateLegendUIs.current.add(cb);
+        return () => { updateLegendUIs.current.delete(cb); };
+    }, [updateLegendUIs]);
+
+    const currentLegend = legendDataRef.current;
+
+    return (
+        <div
+            className="absolute top-0 left-0 right-0 z-20 flex flex-col justify-center px-1.5 select-none bg-[#17191C] text-[10px] gap-y-0.5 border-b border-white/5 pointer-events-none"
+            style={{ height: `${MAIN_LABEL_H}px` }}
+        >
+            <div className="flex flex-wrap items-center justify-between text-muted-foreground w-full">
+                <div className="flex items-center gap-1.5">
+                    <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
+                        MA <ChevronDown className="h-3 w-3" />
+                    </span>
+                    <span>{currentLegend ? fmtTime(currentLegend.time, period) : ''}</span>
+                    <span>{PERIOD_LABEL_MAP[period] || period}</span>
+                </div>
+                <div className="flex items-center pointer-events-auto cursor-pointer">
+                    <Eye className="h-3 w-3" />
+                </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-2 text-[10px]">
+                <span className="text-muted-foreground font-semibold">MA</span>
+                {currentLegend && Object.entries(maConfig).map(([k, c]) =>
+                    visibleMAs[k] && (
+                        <span key={k} style={{ color: c.color }}>
+                            {c.label.replace('MA', '')}:{fmt(currentLegend[k as keyof FormattedChartData] as number, 2)}
+                        </span>
+                    )
+                )}
+            </div>
+        </div>
+    );
+});
+
+const IndLegend = memo(({ legendDataRef, updateLegendUIs, ind }: { legendDataRef: React.MutableRefObject<FormattedChartData | null>, updateLegendUIs: React.MutableRefObject<Set<() => void>>, ind: IndicatorType }) => {
+    const [, forceRender] = useState(0);
+
+    useEffect(() => {
+        const cb = () => forceRender(prev => prev + 1);
+        updateLegendUIs.current.add(cb);
+        return () => { updateLegendUIs.current.delete(cb); };
+    }, [updateLegendUIs]);
+
+    const currentLegend = legendDataRef.current;
+
+    const row = (items: [string, string, number|undefined][]) => (
+        <div className="flex items-center gap-2 text-[10px] ml-1">
+            {items.map(([label, color, val]) => (
+                <span key={label} style={{ color }}>{label}:{fmt(val)}</span>
+            ))}
+        </div>
+    );
+
+    return (
+        <div
+            className="absolute top-0 left-0 right-0 z-20 flex items-center flex-wrap gap-1 px-1.5 select-none bg-[#17191C] text-[10px] pointer-events-none"
+            style={{ height: `${IND_LABEL_H}px` }}
+        >
+            <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
+                {ind} <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </span>
+            <span className="text-muted-foreground ml-1">
+                {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ''}
+            </span>
+            {currentLegend && (
+                <>
+                    {ind === 'Volume' && <span className="text-[10px] text-muted-foreground ml-1">量:{fmtV(currentLegend.volume)}</span>}
+                    {ind === 'MACD' && row([['MACD', '#ef5350', currentLegend.macd_hist], ['DIFF', macdConfig.macd.color, currentLegend.macd], ['DEA', macdConfig.macd_signal.color, currentLegend.macd_signal]])}
+                    {ind === 'KDJ' && row([['K', kdjConfig.k.color, currentLegend.kdj_k], ['D', kdjConfig.d.color, currentLegend.kdj_d], ['J', kdjConfig.j.color, currentLegend.kdj_j]])}
+                    {ind === 'RSI' && row([['RSI1', rsiConfig.rsi1.color, currentLegend.rsi_6], ['RSI2', rsiConfig.rsi2.color, currentLegend.rsi_12], ['RSI3', rsiConfig.rsi3.color, currentLegend.rsi_24]])}
+                    {ind === 'TRIX' && row([['TRIX', trixConfig.trix.color, currentLegend.trix], ['TRMA', trixConfig.trma.color, currentLegend.trma]])}
+                    {ind === 'DMI' && row([['DI1', dmiConfig.pdi.color, currentLegend.pdi], ['DI2', dmiConfig.mdi.color, currentLegend.mdi], ['ADX', dmiConfig.adx.color, currentLegend.adx], ['ADXR', dmiConfig.adxr.color, currentLegend.adxr]])}
+                    {ind === 'BIAS' && row([['B1', biasConfig.bias6.color, currentLegend.bias_6], ['B2', biasConfig.bias12.color, currentLegend.bias_12], ['B3', biasConfig.bias24.color, currentLegend.bias_24]])}
+                    {ind === 'BBI' && row([['BBI', bbiConfig.bbi.color, currentLegend.bbi]])}
+                    {ind === 'CCI' && row([['CCI', cciConfig.cci.color, currentLegend.cci]])}
+                    {ind === 'DPO' && row([['DPO', dpoConfig.dpo.color, currentLegend.dpo], ['MA', dpoConfig.madpo.color, currentLegend.madpo]])}
+                    {ind === 'BOLL' && row([['UP', bollConfig.upper.color, currentLegend.boll_upper], ['MID', bollConfig.middle.color, currentLegend.boll_middle], ['LO', bollConfig.lower.color, currentLegend.boll_lower]])}
+                    {ind === 'LON' && row([['LON', lonConfig.lon.color, currentLegend.lon], ['MA', lonConfig.lonma.color, currentLegend.lonma]])}
+                </>
+            )}
+        </div>
+    );
+});
+
+// ─────────────────────────────────────────────
 // KlineChart Component
 // ─────────────────────────────────────────────
 export function KlineChart({
@@ -298,12 +445,19 @@ export function KlineChart({
     const containerRef = useRef<HTMLDivElement>(null);
 
     const [data,    setData   ] = useState<FormattedChartData[]>([]);
-    const [dataMap, setDataMap] = useState(new Map<LightweightCharts.Time, FormattedChartData>());
+    const dataMapRef = useRef(new Map<LightweightCharts.Time, FormattedChartData>());
     const [loading, setLoading] = useState(true);
     const [error,   setError  ] = useState<string | null>(null);
     const [renderError, setRenderError] = useState<string | null>(null);
     const [debugInfo, setDebugInfo] = useState<string>('');
-    const [legend,  setLegend ] = useState<FormattedChartData | null>(null);
+    const legendDataRef = useRef<FormattedChartData | null>(null);
+    const lastLegendTimeRef = useRef<LightweightCharts.Time | null>(null);
+    const updateLegendUIs = useRef<Set<() => void>>(new Set());
+    const seriesRefs = useRef<{
+        candle: ISeriesApi<"Candlestick"> | null;
+        mas: Record<string, ISeriesApi<"Line">>;
+        indicators: Record<string, ISeriesApi<any>>;
+    }>({ candle: null, mas: {}, indicators: {} });
 
     const stockLabel = STOCKS.find(s => s.value === stockCode)?.label || stockCode;
 
@@ -312,8 +466,8 @@ export function KlineChart({
         let alive = true;
         async function load() {
             if (!token && !isCapacitor) return;
-            if (!stockCode) { setData([]); setDataMap(new Map()); setLegend(null); setError(null); setLoading(false); return; }
-            setLoading(true); setError(null); setData([]); setDataMap(new Map()); setLegend(null);
+            if (!stockCode) { setData([]); dataMapRef.current = new Map(); legendDataRef.current = null; setError(null); setLoading(false); return; }
+            setLoading(true); setError(null); setData([]); dataMapRef.current = new Map(); legendDataRef.current = null;
             try {
                 const raw = await fetchKlineData(stockCode, period, token || '');
                 if (!alive) return;
@@ -333,8 +487,13 @@ export function KlineChart({
                 transformed = calculateAllIndicators(transformed as any) as FormattedChartData[];
                 const map = new Map<LightweightCharts.Time, FormattedChartData>();
                 transformed.forEach(d => map.set(d.time, d));
-                setData(transformed); setDataMap(map);
-                setLegend(transformed[transformed.length - 1] ?? null);
+                setData(transformed); dataMapRef.current = map;
+                if (transformed.length > 0) {
+                    legendDataRef.current = transformed[transformed.length - 1];
+                    updateLegendUIs.current.forEach(cb => cb());
+                } else {
+                    legendDataRef.current = null;
+                }
             } catch (e: any) {
                 if (alive) setError(e.message);
             } finally {
@@ -357,11 +516,10 @@ export function KlineChart({
 
         let allCharts: IChartApi[] = [];
         let ro: ResizeObserver | null = null;
-        let syncRafId: number | null = null;
+        const syncRafIds = new Map<IChartApi, number>();
 
         const initChart = () => {
             try {
-                // 如果组件已卸载、或已初始化成功、或容器丢失，直接终止
                 if (disposed || initialized || !containerRef.current) return;
 
                 const root   = containerRef.current;
@@ -372,21 +530,19 @@ export function KlineChart({
                     
                 if (!mainEl || indEls.length !== indicatorPanes.length) return;
                 
-                // 🔥 核心逻辑：获取尺寸并验证
                 const { clientWidth, clientHeight } = mainEl;
                 
                 if (!clientWidth || !clientHeight) {
                     if (retryCount++ > MAX_RETRY) {
                         console.warn('Chart init aborted: container size still 0 after 60 frames.');
                         setDebugInfo(`布局失败: 容器高度为 0`);
-                        return; // 放弃治疗，防止死循环烧烂 CPU
+                        return; 
                     }
                     setDebugInfo(`Waiting layout... ${retryCount}/${MAX_RETRY}`);
                     rafHandle = requestAnimationFrame(initChart);
                     return; 
                 }
 
-                // 走到这里，说明拿到了真实宽高，立刻加锁！
                 initialized = true;
                 setDebugInfo(`root: ${root.clientHeight}px, mainEl: ${mainEl.clientHeight}px`);
 
@@ -407,30 +563,29 @@ export function KlineChart({
                     wickUpColor: '#ef5350', wickDownColor: '#26a69a',
                 });
                 candleSeries.setData(data);
+                seriesRefs.current.candle = candleSeries;
 
-                // MA lines
+                // MA lines - 初始化所有的 MA
                 Object.keys(maConfig).forEach(key => {
-                    if (visibleMAs[key]) {
-                        const s = mainChart.addLineSeries({ color: maConfig[key].color, ...sopts });
-                        s.setData(safeData(data, key as keyof FormattedChartData));
-                    }
+                    const s = mainChart.addLineSeries({ color: maConfig[key].color, visible: !!visibleMAs[key], ...sopts });
+                    s.setData(safeData(data, key as keyof FormattedChartData));
+                    seriesRefs.current.mas[key] = s;
                 });
+                
+                // 初始 Divergence Marker
                 if (showDivergence) candleSeries.setMarkers(sortMarkers(calcMacdDivergence(data)));
 
                 // ── Indicator charts ──
-                // ✅ 副图时间轴隐藏（只有最后一个副图才显示时间轴刻度）
                 const indCharts: IChartApi[] = indEls.map((el, idx) => {
                     const isLast = idx === indEls.length - 1;
                     return LightweightCharts.createChart(el, {
                         ...baseChartOpts(period),
                         width:  el.clientWidth,
                         height: el.clientHeight,
-                        // ✅ 非最后一个副图隐藏时间轴刻度文字，节省垂直空间
                         timeScale: {
                             ...baseChartOpts(period).timeScale,
                             visible: isLast,
                         },
-                        // 减小指标图表上下留白
                         rightPriceScale: {
                             ...baseChartOpts(period).rightPriceScale,
                             scaleMargins: { top: 0.02, bottom: 0.02 },
@@ -536,7 +691,11 @@ export function KlineChart({
                     return primary;
                 };
 
-                const indSeries = indicatorPanes.map((ind, i) => drawIndicator(indCharts[i], ind));
+                const indSeries = indicatorPanes.map((ind, i) => {
+                    const s = drawIndicator(indCharts[i], ind);
+                    if (s) seriesRefs.current.indicators[ind] = s;
+                    return s;
+                });
                 allCharts = [mainChart, ...indCharts];
 
                 // ─── Cross-chart sync with rAF debounce ───
@@ -548,17 +707,33 @@ export function KlineChart({
 
                 allCharts.forEach(chart => {
                     chart.subscribeCrosshairMove(param => {
-                        if (syncRafId) cancelAnimationFrame(syncRafId);
-                        syncRafId = requestAnimationFrame(() => {
+                        const existingId = syncRafIds.get(chart);
+                        if (existingId) cancelAnimationFrame(existingId);
+                        
+                        const newId = requestAnimationFrame(() => {
                             if (!param.point || !param.time) {
-                                if (data.length) setLegend(data[data.length - 1]);
+                                if (data.length) {
+                                    legendDataRef.current = data[data.length - 1];
+                                    updateLegendUIs.current.forEach(cb => cb());
+                                }
                                 syncGroup.forEach(g => { if (g.chart !== chart) g.chart.clearCrosshairPosition(); });
+                                lastLegendTimeRef.current = null;
                                 return;
                             }
-                            const dp = dataMap.get(param.time);
-                            if (dp) setLegend(dp);
+
+                            // 🔴 核心优化：只有鼠标移动到了"新的一根K线"上，才去查字典、触发重绘
+                            if (param.time !== lastLegendTimeRef.current) {
+                                lastLegendTimeRef.current = param.time;
+                                const dp = dataMapRef.current.get(param.time);
+                                if (dp) {
+                                    legendDataRef.current = dp;
+                                    updateLegendUIs.current.forEach(cb => cb());
+                                }
+                            }
+
                             syncGroup.forEach(g => {
                                 if (g.chart === chart || !g.series) return;
+                                const dp = dataMapRef.current.get(param.time!);
                                 const price = dp?.[g.field];
                                 if (price != null && !isNaN(price as number))
                                     g.chart.setCrosshairPosition(price as number, param.time!, g.series);
@@ -566,6 +741,7 @@ export function KlineChart({
                                     g.chart.clearCrosshairPosition();
                             });
                         });
+                        syncRafIds.set(chart, newId);
                     });
 
                     chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
@@ -581,17 +757,23 @@ export function KlineChart({
                 elMap.set(mainEl, mainChart);
                 indEls.forEach((el, i) => elMap.set(el, indCharts[i]));
                 
+                const sizeCache = new WeakMap<Element, { width: number; height: number }>();
+
                 ro = new ResizeObserver(entries => {
                     requestAnimationFrame(() => {
                         entries.forEach(entry => {
                             const c = elMap.get(entry.target);
-                            if (c) {
-                                // 防小数模糊，防 0 尺寸崩溃
-                                const width = Math.floor(entry.contentRect.width);
-                                const height = Math.floor(entry.contentRect.height);
-                                if (width > 0 && height > 0) {
-                                    c.applyOptions({ width, height });
-                                }
+                            if (!c) return;
+
+                            const width = Math.floor(entry.contentRect.width);
+                            const height = Math.floor(entry.contentRect.height);
+
+                            if (width <= 0 || height <= 0) return;
+
+                            const prev = sizeCache.get(entry.target);
+                            if (!prev || prev.width !== width || prev.height !== height) {
+                                sizeCache.set(entry.target, { width, height });
+                                c.applyOptions({ width, height });
                             }
                         });
                     });
@@ -606,14 +788,53 @@ export function KlineChart({
         rafHandle = requestAnimationFrame(initChart);
 
         return () => {
-            disposed = true; // 通知正在跑的轮询赶紧停下
+            disposed = true; 
             if (rafHandle) cancelAnimationFrame(rafHandle);
-            if (syncRafId) cancelAnimationFrame(syncRafId);
+            
+            // 🔴 完美补丁 2：遍历取消所有还在队列里的十字光标同步帧
+            syncRafIds.forEach(id => cancelAnimationFrame(id));
+            syncRafIds.clear(); // 顺手清空 Map，释放引用，养成好习惯
+            
             if (ro) ro.disconnect();
             allCharts.forEach(c => c.remove());
         };
-    }, [data, loading, error, period, indicatorPanes, visibleMAs, dataMap,
-        showDivergence, showTrixSignal, showDpoSignal, showBbiSignal]);
+    }, [data, period, indicatorPanes]); // 去除了 visibleMAs 和 showDivergence 等状态
+
+    // 3. 动态控制均线可见性 (极速响应)
+    useEffect(() => {
+        Object.keys(seriesRefs.current.mas).forEach(key => {
+            const series = seriesRefs.current.mas[key];
+            if (series) {
+                series.applyOptions({ visible: !!visibleMAs[key] });
+            }
+        });
+    }, [visibleMAs]);
+
+    // 4. 动态控制背离信号和指标信号 (增量更新 Markers)
+    useEffect(() => {
+        const candle = seriesRefs.current.candle;
+        if (candle && data.length) {
+            if (showDivergence) {
+                candle.setMarkers(sortMarkers(calcMacdDivergence(data)));
+            } else {
+                candle.setMarkers([]);
+            }
+        }
+    }, [showDivergence, data]);
+
+    useEffect(() => {
+        const inds = seriesRefs.current.indicators;
+        if (!data.length) return;
+        if (inds['TRIX']) {
+            inds['TRIX'].setMarkers(showTrixSignal ? sortMarkers(calcCrossSignals(data, 'trix', 'trma')) : []);
+        }
+        if (inds['BBI']) {
+            inds['BBI'].setMarkers(showBbiSignal ? sortMarkers(calcBbiSignals(data)) : []);
+        }
+        if (inds['DPO']) {
+            inds['DPO'].setMarkers(showDpoSignal ? sortMarkers(calcCrossSignals(data, 'dpo', 'madpo')) : []);
+        }
+    }, [showTrixSignal, showBbiSignal, showDpoSignal, data]);
 
     // ─── Render ────────────────────────────────────────────────────
     if (loading) return <Skeleton className="h-full w-full bg-transparent" />;
@@ -628,48 +849,6 @@ export function KlineChart({
         );
     }
 
-    const changeVal = legend ? legend.close - legend.open : 0;
-    const changePct = legend?.open ? (changeVal / legend.open) * 100 : 0;
-    const isUp = changeVal >= 0;
-
-    // ── Compact top legend (like trading apps) ─────────────────────
-    const TopLegend = () => {
-        if (!legend) return null;
-        return (
-            <div className="flex flex-col px-2 py-1.5 select-none border-b border-white/5 flex-shrink-0 bg-[#17191C]">
-                <div className="flex items-center justify-between w-full">
-                    {/* Left: Big Price & Change */}
-                    <div className={`flex flex-col shrink-0 ${isUp ? 'text-[#ef5350]' : 'text-[#26a69a]'}`}>
-                        <div className="text-[24px] font-bold font-mono leading-none">{fmt(legend.close)}</div>
-                        <div className="flex items-center gap-2 text-[11px] font-mono mt-1 font-semibold">
-                            <span>{isUp ? '+' : ''}{fmt(changeVal)}</span>
-                            <span>{isUp ? '+' : ''}{fmt(changePct)}%</span>
-                        </div>
-                    </div>
-                    {/* Center & Right: Grid of details */}
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground flex-1 ml-4 justify-items-end">
-                        <div className="flex justify-between items-center w-full max-w-[100px]">
-                            <span className="shrink-0 mr-1 opacity-70">高</span>
-                            <span className="font-mono text-[#ef5350] truncate font-semibold">{fmt(legend.high)}</span>
-                        </div>
-                        <div className="flex justify-between items-center w-full max-w-[100px]">
-                            <span className="shrink-0 mr-1 opacity-70">低</span>
-                            <span className="font-mono text-[#26a69a] truncate font-semibold">{fmt(legend.low)}</span>
-                        </div>
-                        <div className="flex justify-between items-center w-full max-w-[100px]">
-                            <span className="shrink-0 mr-1 opacity-70">开</span>
-                            <span className="font-mono text-foreground truncate">{fmt(legend.open)}</span>
-                        </div>
-                        <div className="flex justify-between items-center w-full max-w-[100px]">
-                            <span className="shrink-0 mr-1 opacity-70">量</span>
-                            <span className="font-mono text-foreground truncate">{fmtV(legend.volume)}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    };
-
     if (renderError) {
         return (
             <div className="flex flex-col h-full items-center justify-center p-4">
@@ -683,58 +862,17 @@ export function KlineChart({
         );
     }
 
-    // ── Compact indicator legend ───────────────────────────────────
-    const IndLegend = ({ ind }: { ind: IndicatorType }) => {
-        if (!legend) return null;
-        const row = (items: [string, string, number|undefined][]) => (
-            <div className="flex items-center gap-2 text-[10px] ml-1">
-                {items.map(([label, color, val]) => (
-                    <span key={label} style={{ color }}>{label}:{fmt(val)}</span>
-                ))}
-            </div>
-        );
-        switch (ind) {
-            case 'Volume': return <span className="text-[10px] text-muted-foreground ml-1">量:{fmtV(legend.volume)}</span>;
-            case 'MACD':   return row([['MACD', '#ef5350', legend.macd_hist], ['DIFF', macdConfig.macd.color, legend.macd], ['DEA', macdConfig.macd_signal.color, legend.macd_signal]]);
-            case 'KDJ':    return row([['K', kdjConfig.k.color, legend.kdj_k], ['D', kdjConfig.d.color, legend.kdj_d], ['J', kdjConfig.j.color, legend.kdj_j]]);
-            case 'RSI':    return row([['RSI1', rsiConfig.rsi1.color, legend.rsi_6], ['RSI2', rsiConfig.rsi2.color, legend.rsi_12], ['RSI3', rsiConfig.rsi3.color, legend.rsi_24]]);
-            case 'TRIX':   return row([['TRIX', trixConfig.trix.color, legend.trix], ['TRMA', trixConfig.trma.color, legend.trma]]);
-            case 'DMI':    return row([['DI1', dmiConfig.pdi.color, legend.pdi], ['DI2', dmiConfig.mdi.color, legend.mdi], ['ADX', dmiConfig.adx.color, legend.adx], ['ADXR', dmiConfig.adxr.color, legend.adxr]]);
-            case 'BIAS':   return row([['B1', biasConfig.bias6.color, legend.bias_6], ['B2', biasConfig.bias12.color, legend.bias_12], ['B3', biasConfig.bias24.color, legend.bias_24]]);
-            case 'BBI':    return row([['BBI', bbiConfig.bbi.color, legend.bbi]]);
-            case 'CCI':    return row([['CCI', cciConfig.cci.color, legend.cci]]);
-            case 'DPO':    return row([['DPO', dpoConfig.dpo.color, legend.dpo], ['MA', dpoConfig.madpo.color, legend.madpo]]);
-            case 'BOLL':   return row([['UP', bollConfig.upper.color, legend.boll_upper], ['MID', bollConfig.middle.color, legend.boll_middle], ['LO', bollConfig.lower.color, legend.boll_lower]]);
-            case 'LON':    return row([['LON', lonConfig.lon.color, legend.lon], ['MA', lonConfig.lonma.color, legend.lonma]]);
-            default: return null;
-        }
-    };
-
-    // ─────────────────────────────────────────────────────────────
-    //  ✅ 布局比例 — 仿东方财富 / 同花顺专业格局
-    //
-    //  主图永远是最大区块，副图紧凑排列在下方：
-    //    0 副图 → 主图占满
-    //    1 副图 → 主图 ~65%  副图 ~35%
-    //    2 副图 → 主图 ~57%  每副图 ~21%   (默认: 成交量 + MACD)
-    //    3 副图 → 主图 ~52%  每副图 ~16%
-    //
-    //  每个副图强制 min-height 64px，防止高度塌陷
-    // ─────────────────────────────────────────────────────────────
     const indCount = indicatorPanes.length;
     // flex grow 权重：主图(K线)占屏幕的三分之二(2份)，副图共占三分之一(1份)
-    const MAIN_FLEX  = indCount > 0 ? 3 : 1;   // K线主图权重提升
-    const IND_FLEX   = 1;                        // 每个副图固定权重1，不再缩减
-    const MAIN_MIN_H = 160;  // 原来 80px，太小，min-height 导致 flex 塌陷
+    const MAIN_FLEX  = indCount > 0 ? 3 : 1;
+    const IND_FLEX   = 1;
+    const MAIN_MIN_H = 160;
     const IND_MIN_H  = 80;
-    const MAIN_LABEL_H = 34; // 两行文本需要更多高度
-    const IND_LABEL_H = 20;
 
     return (
         <div ref={containerRef} className="flex flex-col flex-1 min-h-0 w-full overflow-hidden bg-[#17191C]">
-
             {/* ① OHLCV 价格信息栏 */}
-            <TopLegend />
+            <TopLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} />
 
             {/* ② 周期切换工具栏 */}
             {toolbar}
@@ -748,36 +886,10 @@ export function KlineChart({
                     borderColor: 'rgba(255,255,255,0.08)'
                 }}
             >
-                {/* MA 图例标签行 —— 绝对定位覆盖在上方 */}
-                <div
-                    className="absolute top-0 left-0 right-0 z-20 flex flex-col justify-center px-1.5 select-none bg-[#17191C] text-[10px] gap-y-0.5 border-b border-white/5 pointer-events-none"
-                    style={{ height: `${MAIN_LABEL_H}px` }}
-                >
-                    <div className="flex flex-wrap items-center justify-between text-muted-foreground w-full">
-                        <div className="flex items-center gap-1.5">
-                            <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
-                                MA <ChevronDown className="h-3 w-3" />
-                            </span>
-                            <span>{legend ? fmtTime(legend.time, period) : ''}</span>
-                            <span>{PERIOD_LABEL_MAP[period] || period}</span>
-                        </div>
-                        <div className="flex items-center pointer-events-auto cursor-pointer">
-                            <Eye className="h-3 w-3" />
-                        </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-2 text-[10px]">
-                        <span className="text-muted-foreground font-semibold">MA</span>
-                        {legend && Object.entries(maConfig).map(([k, c]) =>
-                            visibleMAs[k] && (
-                                <span key={k} style={{ color: c.color }}>
-                                    {c.label.replace('MA', '')}:{fmt(legend[k as keyof FormattedChartData] as number, 2)}
-                                </span>
-                            )
-                        )}
-                    </div>
-                </div>
+                {/* MA 图例标签行 */}
+                <MaLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} period={period} visibleMAs={visibleMAs} />
 
-                {/* 主图 canvas 容器 —— 在标签下方 */}
+                {/* 主图 canvas 容器 */}
                 <div
                     data-pane="main"
                     className="absolute left-0 right-0 bottom-0"
@@ -797,18 +909,7 @@ export function KlineChart({
                     }}
                 >
                     {/* 副图标题 + 指标数值行 */}
-                    <div
-                        className="absolute top-0 left-0 right-0 z-20 flex items-center flex-wrap gap-1 px-1.5 select-none bg-[#17191C] text-[10px] pointer-events-none"
-                        style={{ height: `${IND_LABEL_H}px` }}
-                    >
-                        <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
-                            {ind} <ChevronDown className="h-3 w-3 text-muted-foreground" />
-                        </span>
-                        <span className="text-muted-foreground ml-1">
-                            {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ''}
-                        </span>
-                        <IndLegend ind={ind} />
-                    </div>
+                    <IndLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} ind={ind} />
 
                     {/* 副图 canvas 容器 */}
                     <div
