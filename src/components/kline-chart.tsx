@@ -247,6 +247,65 @@ function getPrimaryField(ind: IndicatorType): keyof FormattedChartData {
 }
 
 // ─────────────────────────────────────────────
+// Swing High/Low Detection (用于主图价格标签)
+// ─────────────────────────────────────────────
+type SwingPoint = { time: LightweightCharts.Time; price: number; type: 'high' | 'low' };
+
+function detectSwingPoints(data: FormattedChartData[]): SwingPoint[] {
+    const n = data.length;
+    if (n < 6) return [];
+
+    // 动态窗口：数据越多窗口越大，避免显示太密集
+    const win = Math.max(4, Math.min(12, Math.round(n / 40)));
+
+    // ① 找出所有局部极值候选点，并记录突出度（prominence）
+    type Candidate = { idx: number; price: number; type: 'high' | 'low'; prominence: number };
+    const candidates: Candidate[] = [];
+
+    for (let i = win; i < n - win; i++) {
+        const d = data[i];
+        let isHigh = true, isLow = true;
+
+        for (let j = i - win; j <= i + win; j++) {
+            if (j === i) continue;
+            if (data[j].high >= d.high) isHigh = false;
+            if (data[j].low  <= d.low)  isLow  = false;
+        }
+
+        if (isHigh) {
+            // 突出度 = 该高点与附近最低点的差值
+            let nearLow = Infinity;
+            for (let j = i - win; j <= i + win; j++) nearLow = Math.min(nearLow, data[j].low);
+            candidates.push({ idx: i, price: d.high, type: 'high', prominence: d.high - nearLow });
+        }
+        if (isLow) {
+            // 突出度 = 附近最高点与该低点的差值
+            let nearHigh = -Infinity;
+            for (let j = i - win; j <= i + win; j++) nearHigh = Math.max(nearHigh, data[j].high);
+            candidates.push({ idx: i, price: d.low, type: 'low', prominence: nearHigh - d.low });
+        }
+    }
+
+    // ② 按突出度降序，保留最显著的若干个极值
+    candidates.sort((a, b) => b.prominence - a.prominence);
+    const topN = candidates.slice(0, Math.min(30, candidates.length));
+
+    // ③ 按时间排序后，去除相邻同类型过近的点（间距 < win*2）
+    topN.sort((a, b) => a.idx - b.idx);
+    const filtered: Candidate[] = [];
+    for (const c of topN) {
+        const tooClose = filtered.some(f => Math.abs(f.idx - c.idx) < win * 2 && f.type === c.type);
+        if (!tooClose) filtered.push(c);
+    }
+
+    // ④ 再次按时间排序，最多返回 14 个标签
+    filtered.sort((a, b) => a.idx - b.idx);
+    const kept = filtered.slice(0, 14);
+
+    return kept.map(c => ({ time: data[c.idx].time as LightweightCharts.Time, price: c.price, type: c.type }));
+}
+
+// ─────────────────────────────────────────────
 // Chart options factory
 // ─────────────────────────────────────────────
 function baseChartOpts(period: string): LightweightCharts.DeepPartial<LightweightCharts.ChartOptions> {
@@ -262,17 +321,13 @@ function baseChartOpts(period: string): LightweightCharts.DeepPartial<Lightweigh
             borderColor: 'rgba(255,255,255,0.08)',
             timeVisible: period !== '1d' && period !== '1w' && period !== '1M',
             secondsVisible: false,
-            // ✅ 增大初始 barSpacing，K 线不再拥挤
             barSpacing: 10,
-            minBarSpacing: 4,
-            fixLeftEdge: false,
+            minBarSpacing: 1,           // 🔧 从4→1：大幅增强缩图能力，手机端可同屏显示~350根K线
+            fixLeftEdge: true,          // 🔧 固定左边缘，防止左滑越界
             lockVisibleTimeRangeOnResize: true,
         },
         rightPriceScale: {
-            borderColor: 'rgba(255,255,255,0.08)',
-            // 减小留白，让K线填满大部分空间
-            scaleMargins: { top: 0.02, bottom: 0.02 },
-            minimumWidth: 52, // 减小由72到52，修复K线过于偏左的问题，同时保留对齐效果
+            visible: false,             // 🔧 隐藏右侧价格刻度栏，价格通过主图内叠加标签显示
         },
         handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
         handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
@@ -443,6 +498,11 @@ export function KlineChart({
 }) {
     const token = useAuthStore(s => s.token);
     const containerRef = useRef<HTMLDivElement>(null);
+    const mainChartRef = useRef<IChartApi | null>(null);      // 🔧 主图实例引用（供价格标签计算使用）
+    const extremaRef   = useRef<SwingPoint[]>([]);             // 🔧 波段高低点数据
+
+    type LabelPos = { x: number; y: number; price: number; type: 'high' | 'low' };
+    const [labelPositions, setLabelPositions] = useState<LabelPos[]>([]); // 🔧 渲染标签的像素坐标
 
     const [data,    setData   ] = useState<FormattedChartData[]>([]);
     const dataMapRef = useRef(new Map<LightweightCharts.Time, FormattedChartData>());
@@ -565,6 +625,32 @@ export function KlineChart({
                 candleSeries.setData(data);
                 seriesRefs.current.candle = candleSeries;
 
+                // 🔧 存储主图实例引用，计算波段高低点
+                mainChartRef.current = mainChart;
+                extremaRef.current = detectSwingPoints(data);
+
+                // 🔧 计算价格标签的像素坐标（在可见区域内的极值点）
+                const computeLabelPositions = () => {
+                    const series = seriesRefs.current.candle;
+                    if (!series || !extremaRef.current.length) return;
+                    const chartWidth = mainEl.clientWidth;
+                    const positions: LabelPos[] = [];
+                    for (const pt of extremaRef.current) {
+                        const x = mainChart.timeScale().timeToCoordinate(pt.time);
+                        const y = series.priceToCoordinate(pt.price);
+                        if (x === null || y === null) continue;
+                        if (x < 10 || x > chartWidth - 10) continue; // 超出可视区忽略
+                        positions.push({ x, y, price: pt.price, type: pt.type });
+                    }
+                    setLabelPositions(positions);
+                };
+
+                // 首次渲染后计算 + 滚动/缩放时实时更新
+                requestAnimationFrame(computeLabelPositions);
+                mainChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    requestAnimationFrame(computeLabelPositions);
+                });
+
                 // MA lines - 初始化所有的 MA
                 Object.keys(maConfig).forEach(key => {
                     const s = mainChart.addLineSeries({ color: maConfig[key].color, visible: !!visibleMAs[key], ...sopts });
@@ -587,8 +673,7 @@ export function KlineChart({
                             visible: isLast,
                         },
                         rightPriceScale: {
-                            ...baseChartOpts(period).rightPriceScale,
-                            scaleMargins: { top: 0.02, bottom: 0.02 },
+                            visible: false,  // 🔧 副图同样隐藏右侧价格栏
                         },
                     });
                 });
@@ -707,30 +792,13 @@ export function KlineChart({
 
                 allCharts.forEach(chart => {
                     chart.subscribeCrosshairMove(param => {
-                        const existingId = syncRafIds.get(chart);
-                        if (existingId) cancelAnimationFrame(existingId);
-                        
-                        const newId = requestAnimationFrame(() => {
-                            if (!param.point || !param.time) {
-                                if (data.length) {
-                                    legendDataRef.current = data[data.length - 1];
-                                    updateLegendUIs.current.forEach(cb => cb());
-                                }
-                                syncGroup.forEach(g => { if (g.chart !== chart) g.chart.clearCrosshairPosition(); });
-                                lastLegendTimeRef.current = null;
-                                return;
-                            }
 
-                            // 🔴 核心优化：只有鼠标移动到了"新的一根K线"上，才去查字典、触发重绘
-                            if (param.time !== lastLegendTimeRef.current) {
-                                lastLegendTimeRef.current = param.time;
-                                const dp = dataMapRef.current.get(param.time);
-                                if (dp) {
-                                    legendDataRef.current = dp;
-                                    updateLegendUIs.current.forEach(cb => cb());
-                                }
-                            }
-
+                        // ── 步骤1：十字光标位置同步（纯 Canvas 操作，必须同步执行）──────────────
+                        // setCrosshairPosition 放在 rAF 里会导致副图竖线比主图晚渲染一帧(~16ms)
+                        // 手指快速滑动时产生肉眼可见的动态错位，必须拆出来同步调用
+                        if (!param.point || !param.time) {
+                            syncGroup.forEach(g => { if (g.chart !== chart) g.chart.clearCrosshairPosition(); });
+                        } else {
                             syncGroup.forEach(g => {
                                 if (g.chart === chart || !g.series) return;
                                 const dp = dataMapRef.current.get(param.time!);
@@ -740,6 +808,31 @@ export function KlineChart({
                                 else
                                     g.chart.clearCrosshairPosition();
                             });
+                        }
+
+                        // ── 步骤2：图例文字更新（触发 React re-render，用 rAF 节流防卡顿）──────
+                        const existingId = syncRafIds.get(chart);
+                        if (existingId) cancelAnimationFrame(existingId);
+
+                        const newId = requestAnimationFrame(() => {
+                            if (!param.point || !param.time) {
+                                if (data.length) {
+                                    legendDataRef.current = data[data.length - 1];
+                                    updateLegendUIs.current.forEach(cb => cb());
+                                }
+                                lastLegendTimeRef.current = null;
+                                return;
+                            }
+
+                            // 只有移动到新的一根K线时，才触发图例重绘
+                            if (param.time !== lastLegendTimeRef.current) {
+                                lastLegendTimeRef.current = param.time;
+                                const dp = dataMapRef.current.get(param.time);
+                                if (dp) {
+                                    legendDataRef.current = dp;
+                                    updateLegendUIs.current.forEach(cb => cb());
+                                }
+                            }
                         });
                         syncRafIds.set(chart, newId);
                     });
@@ -790,11 +883,10 @@ export function KlineChart({
         return () => {
             disposed = true; 
             if (rafHandle) cancelAnimationFrame(rafHandle);
-            
-            // 🔴 完美补丁 2：遍历取消所有还在队列里的十字光标同步帧
             syncRafIds.forEach(id => cancelAnimationFrame(id));
-            syncRafIds.clear(); // 顺手清空 Map，释放引用，养成好习惯
-            
+            syncRafIds.clear();
+            mainChartRef.current = null;   // 🔧 清除主图引用
+            setLabelPositions([]);         // 🔧 清除价格标签
             if (ro) ro.disconnect();
             allCharts.forEach(c => c.remove());
         };
@@ -863,11 +955,10 @@ export function KlineChart({
     }
 
     const indCount = indicatorPanes.length;
-    // flex grow 权重：主图(K线)占屏幕的三分之二(2份)，副图共占三分之一(1份)
-    const MAIN_FLEX  = indCount > 0 ? 3 : 1;
-    const IND_FLEX   = 1;
-    const MAIN_MIN_H = 160;
-    const IND_MIN_H  = 80;
+    // 细化主图权重
+    const MAIN_FLEX  = indCount === 0 ? 1 : (indCount >= 3 ? 3 : 4); 
+    // 主图最低高度托底提升
+    const MAIN_MIN_H = 220; 
 
     return (
         <div ref={containerRef} className="flex flex-col flex-1 min-h-0 w-full overflow-hidden bg-[#17191C]">
@@ -886,39 +977,64 @@ export function KlineChart({
                     borderColor: 'rgba(255,255,255,0.08)'
                 }}
             >
-                {/* MA 图例标签行 */}
                 <MaLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} period={period} visibleMAs={visibleMAs} />
-
-                {/* 主图 canvas 容器 */}
                 <div
                     data-pane="main"
                     className="absolute left-0 right-0 bottom-0"
                     style={{ top: `${MAIN_LABEL_H}px` }}
                 />
+                {/* 🔧 波段高低价标签 overlay — 与 data-pane="main" 完全重叠，pointer-events-none 不阻挡交互 */}
+                <div
+                    className="absolute left-0 right-0 bottom-0 pointer-events-none z-10"
+                    style={{ top: `${MAIN_LABEL_H}px` }}
+                >
+                    {labelPositions.map((lp, i) => (
+                        <span
+                            key={i}
+                            className="absolute font-mono select-none"
+                            style={{
+                                left:      lp.x,
+                                top:       lp.type === 'high' ? lp.y - 16 : lp.y + 3,
+                                transform: 'translateX(-50%)',
+                                fontSize:  '9px',
+                                lineHeight: '1',
+                                color:     lp.type === 'high' ? '#ef5350' : '#26a69a',
+                                textShadow: '0 0 4px rgba(0,0,0,0.9)',  // 黑色阴影提升可读性
+                                whiteSpace: 'nowrap',
+                            }}
+                        >
+                            {fmt(lp.price)}
+                        </span>
+                    ))}
+                </div>
             </div>
 
             {/* ④ 副图区块列表 */}
-            {indicatorPanes.map((ind, i) => (
-                <div
-                    key={`${ind}-${i}`}
-                    className="relative w-full border-t"
-                    style={{
-                        flex: `${IND_FLEX} 1 0%`,
-                        minHeight: `${IND_MIN_H}px`,
-                        borderColor: 'rgba(255,255,255,0.08)'
-                    }}
-                >
-                    {/* 副图标题 + 指标数值行 */}
-                    <IndLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} ind={ind} />
+            {indicatorPanes.map((ind, i) => {
+                const isLast = i === indicatorPanes.length - 1;
+                // 🔴 核心修复：最后副图需为 X 轴(~26px)额外补偿空间，非最后副图保持不变
+                const indFlex = isLast ? 1.3 : 1;
+                const indMinH = isLast ? 105 : 80; 
 
-                    {/* 副图 canvas 容器 */}
+                return (
                     <div
-                        data-pane={`ind-${i}`}
-                        className="absolute left-0 right-0 bottom-0"
-                        style={{ top: `${IND_LABEL_H}px` }}
-                    />
-                </div>
-            ))}
+                        key={`${ind}-${i}`}
+                        className="relative w-full border-t"
+                        style={{
+                            flex: `${indFlex} 1 0%`,
+                            minHeight: `${indMinH}px`,
+                            borderColor: 'rgba(255,255,255,0.08)'
+                        }}
+                    >
+                        <IndLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} ind={ind} />
+                        <div
+                            data-pane={`ind-${i}`}
+                            className="absolute left-0 right-0 bottom-0"
+                            style={{ top: `${IND_LABEL_H}px` }}
+                        />
+                    </div>
+                );
+            })}
         </div>
     );
 }
