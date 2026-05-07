@@ -161,6 +161,7 @@ export default function ChartView() {
           showTrixSignal={showTrixSignal}
           showDpoSignal={showDpoSignal}
           showBbiSignal={showBbiSignal}
+          onChangeIndicator={changeIndicator}
           
           // 核心需求2：顶部周期切换格局（把周期条放置在 K线行情报价下方）
           toolbar={
@@ -290,3 +291,4 @@ export default function ChartView() {
     </div>
   );
 }
+

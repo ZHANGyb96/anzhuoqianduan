@@ -10,6 +10,9 @@ import { useAuthStore } from '@/store/useAuthStore';
 import { calculateAllIndicators } from '@/utils/ta-math';
 import { isCapacitor } from '@/config/platform';
 import { getKlineFromMobileDB } from '@/lib/mobile-db';
+import {
+    Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
 
 type CandlestickData    = LightweightCharts.SeriesDataItemTypeMap['Candlestick'];
 type LineData           = LightweightCharts.SeriesDataItemTypeMap['Line'];
@@ -433,7 +436,19 @@ const MaLegend = memo(({ legendDataRef, updateLegendUIs, period, visibleMAs }: {
     );
 });
 
-const IndLegend = memo(({ legendDataRef, updateLegendUIs, ind }: { legendDataRef: React.MutableRefObject<FormattedChartData | null>, updateLegendUIs: React.MutableRefObject<Set<() => void>>, ind: IndicatorType }) => {
+const IndLegend = memo(({
+    legendDataRef,
+    updateLegendUIs,
+    ind,
+    paneIndex,
+    onChangeIndicator,
+}: {
+    legendDataRef: React.MutableRefObject<FormattedChartData | null>;
+    updateLegendUIs: React.MutableRefObject<Set<() => void>>;
+    ind: IndicatorType;
+    paneIndex: number;
+    onChangeIndicator?: (idx: number, val: IndicatorType) => void;
+}) => {
     const [, forceRender] = useState(0);
 
     useEffect(() => {
@@ -457,12 +472,45 @@ const IndLegend = memo(({ legendDataRef, updateLegendUIs, ind }: { legendDataRef
             className="absolute top-0 left-0 right-0 z-20 flex items-center flex-wrap gap-1 px-1.5 select-none bg-[#17191C] text-[10px] pointer-events-none"
             style={{ height: `${IND_LABEL_H}px` }}
         >
-            <span className="font-semibold text-foreground flex items-center gap-0.5 pointer-events-auto">
-                {ind} <ChevronDown className="h-3 w-3 text-muted-foreground" />
-            </span>
-            <span className="text-muted-foreground ml-1">
+            {/* ── 指标切换器：pointer-events-auto 穿透父层 none，让 Select 可点击 ── */}
+            <div className="pointer-events-auto flex-shrink-0">
+                {onChangeIndicator ? (
+                    <Select
+                        value={ind}
+                        onValueChange={(v) => onChangeIndicator(paneIndex, v as IndicatorType)}
+                    >
+                        <SelectTrigger
+                            className="h-6 min-w-[36px] px-1 border-0 bg-transparent shadow-none focus:ring-0
+                                       text-[10px] font-semibold text-foreground gap-0.5
+                                       hover:bg-white/10 rounded
+                                       [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:opacity-60"
+                        >
+                            <SelectValue />
+                        </SelectTrigger>
+                        {/* position="popper"：Portal 渲染跟随 trigger，不受 overflow:hidden 裁剪 */}
+                        {/* z-[999]：确保浮出所有 canvas 层 */}
+                        <SelectContent position="popper" className="z-[999] min-w-[80px]">
+                            {indicatorList.map(item => (
+                                <SelectItem key={item.value} value={item.value} className="text-xs">
+                                    {item.label}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                ) : (
+                    // 未传回调时降级为静态展示（兼容其他使用场景）
+                    <span className="font-semibold text-foreground flex items-center gap-0.5">
+                        {ind} <ChevronDown className="h-2.5 w-2.5 text-muted-foreground" />
+                    </span>
+                )}
+            </div>
+
+            {/* 参数说明 */}
+            <span className="text-muted-foreground pointer-events-none">
                 {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ''}
             </span>
+
+            {/* 数值图例 */}
             {currentLegend && (
                 <>
                     {ind === 'Volume' && <span className="text-[10px] text-muted-foreground ml-1">量:{fmtV(currentLegend.volume)}</span>}
@@ -489,12 +537,14 @@ const IndLegend = memo(({ legendDataRef, updateLegendUIs, ind }: { legendDataRef
 export function KlineChart({
     stockCode, period, visibleMAs, indicatorPanes,
     showDivergence, showTrixSignal, showDpoSignal, showBbiSignal,
-    toolbar
+    toolbar,
+    onChangeIndicator,
 }: {
     stockCode: string; period: string;
     visibleMAs: Record<string, boolean>; indicatorPanes: IndicatorType[];
     showDivergence: boolean; showTrixSignal: boolean; showDpoSignal: boolean; showBbiSignal: boolean;
     toolbar?: React.ReactNode;
+    onChangeIndicator?: (idx: number, val: IndicatorType) => void;
 }) {
     const token = useAuthStore(s => s.token);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -1026,7 +1076,13 @@ export function KlineChart({
                             borderColor: 'rgba(255,255,255,0.08)'
                         }}
                     >
-                        <IndLegend legendDataRef={legendDataRef} updateLegendUIs={updateLegendUIs} ind={ind} />
+                        <IndLegend
+                            legendDataRef={legendDataRef}
+                            updateLegendUIs={updateLegendUIs}
+                            ind={ind}
+                            paneIndex={i}
+                            onChangeIndicator={onChangeIndicator}
+                        />
                         <div
                             data-pane={`ind-${i}`}
                             className="absolute left-0 right-0 bottom-0"
