@@ -11,9 +11,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { LoaderCircle, Settings, ShieldCheck } from 'lucide-react';
 import { SidebarNav } from '@/components/sidebar-nav';
-import { MobileBottomNav } from '@/components/mobile-bottom-nav'; // 新增
+import { MobileBottomNav } from '@/components/mobile-bottom-nav';
 import { DashboardHeader } from '@/components/dashboard-header';
-import { Logo } from '@/components/logo';
 import { useRouter, usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import { useLicenseStore } from '@/store/useLicenseStore';
@@ -58,56 +57,52 @@ export default function DashboardLayout({
     );
   }
 
-  // ===== 移动端（Capacitor Android）：底部 Tab 导航布局 =====
+  // ===== 移动端（Capacitor）：底部 Tab 导航布局 =====
   if (isCapacitor) {
-  return (
-    // 改动：h-screen → height:100dvh（Android WebView 更精确）
-    <div
-      className="flex flex-col bg-background overflow-hidden"
-      style={{ height: '100dvh' }}
-    >
-      {!isChartPage && <DashboardHeader compact />}
-
-      {/* 改动1：加 min-h-0，防止 flex-1 子项无法收缩
-          改动2：isChartPage 时加 paddingBottom，为固定底部导航留出 64px，
-                 否则图表最下方会被导航栏遮住 */}
-      <main
-        className={`flex-1 min-h-0 flex flex-col overflow-x-hidden ${
-          isChartPage
-            ? 'overflow-y-hidden'
-            : 'overflow-y-auto w-full mobile-main-content'
-        }`}
-        style={
-          isChartPage
-            ? { paddingBottom: 'calc(64px + env(safe-area-inset-bottom, 0px))' }
-            : undefined
-        }
+    return (
+      <div
+        className="flex flex-col bg-background overflow-hidden"
+        style={{ height: '100dvh' }}
       >
-        {/* 改动3：图表页改为 flex flex-col，让 ChartView 能用 flex-1 填满剩余高度 */}
-        <div
-          className={
+        {/* 图表页不显示顶部 header，节省空间 */}
+        {!isChartPage && <DashboardHeader compact />}
+
+        <main
+          className={`flex-1 min-h-0 flex flex-col overflow-x-hidden ${
             isChartPage
-              ? 'flex-1 min-h-0 flex flex-col overflow-hidden w-full'
-              : 'p-3 pb-6'
+              ? 'overflow-y-hidden'
+              : 'overflow-y-auto w-full mobile-main-content'
+          }`}
+          style={
+            isChartPage
+              ? { paddingBottom: 'calc(64px + env(safe-area-inset-bottom, 0px))' }
+              : undefined
           }
         >
-          {children}
-        </div>
-      </main>
+          <div
+            className={
+              isChartPage
+                ? 'flex-1 min-h-0 flex flex-col overflow-hidden w-full'
+                : 'p-3 pb-6'
+            }
+          >
+            {children}
+          </div>
+        </main>
 
-      <MobileBottomNav />
-    </div>
-  );
-}
+        <MobileBottomNav />
+      </div>
+    );
+  }
 
-  // ===== 桌面端：保留原有侧边栏布局 =====
+  // ===== 桌面端：侧边栏布局（无 Logo 标题） =====
   return (
     <SidebarProvider>
       <Sidebar>
         <SidebarHeader>
-          <Logo />
-          <div className="px-2 mt-2">
-            <Badge variant="secondary" className="w-full justify-center py-1 gap-1 border-primary/20 font-headline">
+          {/* Logo 已移除，仅保留版本 Badge */}
+          <div className="px-2 pt-3 pb-1">
+            <Badge variant="secondary" className="w-full justify-center py-1.5 gap-1 border-primary/20 font-headline">
               <ShieldCheck className="h-3 w-3 text-primary" />
               {tier} EDITION
             </Badge>

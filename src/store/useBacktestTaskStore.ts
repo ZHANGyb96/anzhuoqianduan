@@ -21,6 +21,8 @@ import { isCapacitor }          from '@/config/platform';
 import {
     runMobileBacktest,
     mergeCrossPeriodData,
+    getBarWindows,
+    getMinuteWindows,
     type CrossPeriodMap,
 } from '@/utils/mobile-backtest-engine';
 import {
@@ -173,7 +175,7 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                                     // 不抛出错误，允许降级（条件评估时 HTF 字段为 null → 跳过该信号）
                                 } else {
                                     // 计算 HTF 指标后注入到主周期 bars
-                                    bars = mergeCrossPeriodData(bars, htfRaw, htfPeriod);
+                                    bars = mergeCrossPeriodData(bars, htfRaw, htfPeriod, mainPeriod);
                                 }
                             }
                         }
@@ -181,14 +183,29 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                         stocksObj[code] = bars;
                     }
 
-                    // ── 3. 执行本地回测 ────────────────────────────────────
+                    // ── 3. 加载1分钟K线（用于分钟级统计，非必须）──────────
+                    const minuteWindows = getMinuteWindows(mainPeriod);
+                    const minute1Map: Record<string, any[]> = {};
+                    if (minuteWindows.length > 0) {
+                        for (const code of usableStocks) {
+                            try {
+                                const min1 = await getKlineFromMobileDB(code, '1m', 12000);
+                                if (min1.length >= 10) minute1Map[code] = min1;
+                            } catch {
+                                // 无1分钟数据时分钟级统计为空，K线级统计正常
+                            }
+                        }
+                    }
+
+                    // ── 4. 执行本地回测 ────────────────────────────────────
                     const totalStocks = usableStocks.length;
                     let doneCount = 0;
 
                     const result = runMobileBacktest(
                         stocksObj,
+                        minute1Map,
+                        mainPeriod,
                         finalConditionTree as any,
-                        [3, 6, 9, 12, 15, 18, 24, 30],
                         (done, total) => {
                             doneCount = done;
                             set({ progress: { done, total } });
@@ -199,11 +216,11 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
 
                     // ── 4. 附加回测元信息 ──────────────────────────────────
                     result.batch_info = {
-                        requested:   stockCodes.length,
-                        processed:   usableStocks.length,
-                        skipped:     stockCodes.length - usableStocks.length,
+                        requested:    stockCodes.length,
+                        processed:    usableStocks.length,
+                        skipped:      stockCodes.length - usableStocks.length,
                         cross_periods: crossPeriods,
-                        main_period: mainPeriod,
+                        main_period:  mainPeriod,
                     };
 
                     set({

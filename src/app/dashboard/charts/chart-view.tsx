@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Loader2, Settings2, Plus, Trash2, ChevronDown, AlertCircle, Star, Search } from 'lucide-react';
+import { Loader2, Settings2, Plus, Trash2, ChevronDown, AlertCircle, Star, Search, Bot } from 'lucide-react';
 import { IndicatorType, indicatorList, maConfig } from '@/components/kline-chart';
 import { useAuthStore } from '@/store/useAuthStore';
 import { useMarketDataStore } from '@/store/useMarketDataStore';
@@ -11,6 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
+import { ChartContext } from '@/lib/ai-caller';
+import type { FormattedChartData } from '@/components/kline-chart';
+import { useAIStore } from '@/store/useAIStore';
 
 // SSR 安全的动态加载（LightweightCharts 依赖 window）
 const KlineChart = dynamic(
@@ -72,6 +76,28 @@ export default function ChartView() {
   const [showBbiSignal,  setShowBbiSignal ] = useState(true);
   const [indicatorPanes, setIndicatorPanes] = useState<IndicatorType[]>(['Volume', 'MACD']);
 
+  // ── AI 分析状态 ──────────────────────────────────────────────────────────
+  const [aiPanelOpen,  setAIPanelOpen ] = useState(false);
+  const [chartContext, setChartContext] = useState<ChartContext | null>(null);
+  const clearMessages = useAIStore(s => s.clearMessages);
+
+  // Fix 5：切换品种或周期时清空对话，避免 AI 用旧品种的上下文回答新品种的问题
+  const prevKeyRef = useRef('');
+  useEffect(() => {
+    const key = `${selectedStock}__${selectedPeriod}`;
+    if (prevKeyRef.current && prevKeyRef.current !== key) {
+      clearMessages();
+      setChartContext(null);
+    }
+    prevKeyRef.current = key;
+  }, [selectedStock, selectedPeriod, clearMessages]);
+
+  // Fix 2：副图指标变化时同步更新 chartContext.activePanes，
+  // 避免 onDataReady 闭包只在数据加载时执行一次而导致 activePanes 永远陈旧
+  useEffect(() => {
+    setChartContext(prev => prev ? { ...prev, activePanes: indicatorPanes } : prev);
+  }, [indicatorPanes]);
+
   const addIndicator = () => {
     if (indicatorPanes.length >= 3) return;
     const used = new Set(indicatorPanes);
@@ -82,6 +108,27 @@ export default function ChartView() {
     setIndicatorPanes(p => p.filter((_, i) => i !== idx));
   const changeIndicator = (idx: number, val: IndicatorType) =>
     setIndicatorPanes(p => { const n = [...p]; n[idx] = val; return n; });
+
+  // ── AI 数据就绪回调 ──────────────────────────────────────────────────────
+  const handleDataReady = (data: FormattedChartData[]) => {
+    const sym = availableSymbols.find(s => s.value === selectedStock);
+    setChartContext({
+      stockCode:   selectedStock,
+      stockName:   sym?.label?.replace(` (${selectedStock})`, '') ?? selectedStock,
+      period:      selectedPeriod,
+      activePanes: indicatorPanes,
+      bars: data.map(d => ({
+        time:         String(d.time),
+        open:         d.open,  high: d.high, low: d.low, close: d.close, volume: d.volume,
+        ma5:          d.ma5,   ma10: d.ma10, ma20: d.ma20, ma60: d.ma60,
+        macd:         d.macd,  macd_signal: d.macd_signal, macd_hist: d.macd_hist,
+        kdj_k:        d.kdj_k, kdj_d: d.kdj_d, kdj_j: d.kdj_j,
+        rsi_6:        d.rsi_6, rsi_12: d.rsi_12, rsi_24: d.rsi_24,
+        boll_upper:   d.boll_upper, boll_middle: d.boll_middle, boll_lower: d.boll_lower,
+        cci:          d.cci,   bias_6: d.bias_6, bias_12: d.bias_12,
+      })),
+    });
+  };
 
   // ── 当前品种显示名 ───────────────────────────────────────────────────────
   const currentSymbol = availableSymbols.find(s => s.value === selectedStock);
@@ -162,10 +209,11 @@ export default function ChartView() {
           showDpoSignal={showDpoSignal}
           showBbiSignal={showBbiSignal}
           onChangeIndicator={changeIndicator}
-          
-          // 核心需求2：顶部周期切换格局（把周期条放置在 K线行情报价下方）
+          onDataReady={handleDataReady}
+
+          // 顶部周期切换 + AI 按钮
           toolbar={
-            <div className="flex items-center px-1 h-8 shrink-0 border-b border-white/5 bg-[#17191C] w-full">
+            <div className="flex items-center px-1 h-8 shrink-0 border-b border-white/5 bg-[#17191C] w-full gap-1">
               <div
                 ref={periodScrollRef}
                 className="flex items-center flex-1 min-w-0 overflow-x-auto no-scrollbar scroll-smooth h-full space-x-1"
@@ -188,6 +236,22 @@ export default function ChartView() {
                     )}
                   </button>
                 ))}
+              </div>
+
+              {/* AI 分析按钮 */}
+              <div className="flex-shrink-0 ml-1 relative z-50">
+                <button
+                  onClick={() => setAIPanelOpen(true)}
+                  className={`flex items-center justify-center h-7 w-7 rounded appearance-none outline-none
+                              border transition-colors
+                              ${aiPanelOpen
+                                ? 'bg-primary/20 border-primary/50 text-primary'
+                                : 'bg-transparent border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/5'
+                              }`}
+                  title="AI 分析"
+                >
+                  <Bot className="h-3.5 w-3.5 flex-shrink-0" />
+                </button>
               </div>
 
               {/* 设置按钮 → Bottom Sheet */}
@@ -288,6 +352,13 @@ export default function ChartView() {
           }
         />
       </div>
+
+      {/* ── AI 分析面板（右侧抽屉） ── */}
+      <AIAnalysisPanel
+        open={aiPanelOpen}
+        onOpenChange={setAIPanelOpen}
+        chartContext={chartContext}
+      />
     </div>
   );
 }

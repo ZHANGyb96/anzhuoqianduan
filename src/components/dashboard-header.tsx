@@ -1,7 +1,6 @@
 'use client';
 
 import { SidebarTrigger } from './ui/sidebar';
-import { Logo } from './logo';
 import { useAuthStore } from '@/store/useAuthStore';
 import {
   DropdownMenu,
@@ -16,7 +15,6 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { LogOut, User as UserIcon } from 'lucide-react';
 
 interface DashboardHeaderProps {
-  /** 移动端紧凑模式：隐藏 SidebarTrigger，降低 Header 高度 */
   compact?: boolean;
 }
 
@@ -26,24 +24,12 @@ export function DashboardHeader({ compact = false }: DashboardHeaderProps) {
   return (
     <header
       className={`sticky top-0 z-10 flex items-center gap-4 border-b bg-background/80 px-4 backdrop-blur-sm ${
-        compact ? 'h-12' : 'h-16'
+        compact ? 'h-12' : 'h-14'
       }`}
     >
-      {/* 桌面端：侧边栏触发按钮 + Logo */}
+      {/* 桌面端侧边栏触发按钮（仅非compact模式） */}
       {!compact && (
-        <div className="flex items-center gap-4">
-          <SidebarTrigger className="md:hidden" />
-          <div className="hidden md:block">
-            <Logo />
-          </div>
-        </div>
-      )}
-
-      {/* 移动端（compact）：直接显示 Logo 在左侧 */}
-      {compact && (
-        <div className="flex items-center">
-          <Logo />
-        </div>
+        <SidebarTrigger className="md:hidden" />
       )}
 
       {/* 右侧用户菜单 */}

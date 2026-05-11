@@ -35,7 +35,7 @@ type RawKlineData = {
     vol_ma5?: number|null; vol_ma10?: number|null;
 };
 
-type FormattedChartData = CandlestickData & {
+export type FormattedChartData = CandlestickData & {
     open: number; high: number; low: number; close: number; volume: number;
     ma5?: number; ma10?: number; ma20?: number; ma60?: number; ma120?: number; ma250?: number;
     macd?: number; macd_signal?: number; macd_hist?: number;
@@ -539,12 +539,15 @@ export function KlineChart({
     showDivergence, showTrixSignal, showDpoSignal, showBbiSignal,
     toolbar,
     onChangeIndicator,
+    onDataReady,
 }: {
     stockCode: string; period: string;
     visibleMAs: Record<string, boolean>; indicatorPanes: IndicatorType[];
     showDivergence: boolean; showTrixSignal: boolean; showDpoSignal: boolean; showBbiSignal: boolean;
     toolbar?: React.ReactNode;
     onChangeIndicator?: (idx: number, val: IndicatorType) => void;
+    /** AI 分析：数据就绪后回调最新的完整数据 */
+    onDataReady?: (data: FormattedChartData[]) => void;
 }) {
     const token = useAuthStore(s => s.token);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -601,6 +604,8 @@ export function KlineChart({
                 if (transformed.length > 0) {
                     legendDataRef.current = transformed[transformed.length - 1];
                     updateLegendUIs.current.forEach(cb => cb());
+                    // AI 数据回调：将完整 K 线+指标数据暴露给父组件
+                    onDataReady?.(transformed);
                 } else {
                     legendDataRef.current = null;
                 }
