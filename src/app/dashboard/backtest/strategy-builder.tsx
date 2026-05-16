@@ -25,6 +25,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
 import { PlusCircle, Trash2, Play, ChevronDown, ChevronUp, Info, Layers, Package } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 // ─── 类型定义 ────────────────────────────────────────────────────────────────
 
@@ -75,14 +76,14 @@ const INDICATOR_GROUPS: Record<IndicatorKey, { label: string; lines: { value: st
   MA: {
     label: '均线 MA',
     lines: [
-      { value: 'ma5',      label: 'MA5'     },
-      { value: 'ma10',     label: 'MA10'    },
-      { value: 'ma20',     label: 'MA20'    },
-      { value: 'ma60',     label: 'MA60'    },
-      { value: 'ma120',    label: 'MA120'   },
-      { value: 'ma250',    label: 'MA250'   },
-      { value: 'vol_ma5',  label: '量均MA5' },
-      { value: 'vol_ma10', label: '量均MA10'},
+      { value: 'ma5',      label: 'MA5'      },
+      { value: 'ma10',     label: 'MA10'     },
+      { value: 'ma20',     label: 'MA20'     },
+      { value: 'ma60',     label: 'MA60'     },
+      { value: 'ma120',    label: 'MA120'    },
+      { value: 'ma250',    label: 'MA250'    },
+      { value: 'vol_ma5',  label: '量均MA5'  },
+      { value: 'vol_ma10', label: '量均MA10' },
     ],
   },
   MACD: {
@@ -175,39 +176,39 @@ const INDICATOR_LIST = Object.entries(INDICATOR_GROUPS).map(([key, val]) => ({
 const MAX_STOCKS = 20;
 
 const PERIODS = [
-  { value: '1m',   label: '1分钟'  },
-  { value: '5m',   label: '5分钟'  },
-  { value: '15m',  label: '15分钟' },
-  { value: '30m',  label: '30分钟' },
-  { value: '60m',  label: '60分钟' },
-  { value: '120m', label: '120分钟'},
-  { value: '240m', label: '240分钟'},
-  { value: '1d',   label: '日线'   },
-  { value: '1w',   label: '周线'   },
-  { value: '1M',   label: '月线'   },
+  { value: '1m',   label: '1分钟'   },
+  { value: '5m',   label: '5分钟'   },
+  { value: '15m',  label: '15分钟'  },
+  { value: '30m',  label: '30分钟'  },
+  { value: '60m',  label: '60分钟'  },
+  { value: '120m', label: '120分钟' },
+  { value: '240m', label: '240分钟' },
+  { value: '1d',   label: '日线'    },
+  { value: '1w',   label: '周线'    },
+  { value: '1M',   label: '月线'    },
 ];
 
 const LINK_PERIODS = [
   { value: '__main__', label: '跟随主周期' },
-  { value: '5m',   label: '5分钟'  },
-  { value: '15m',  label: '15分钟' },
-  { value: '30m',  label: '30分钟' },
-  { value: '60m',  label: '60分钟' },
-  { value: '120m', label: '120分钟'},
-  { value: '240m', label: '240分钟'},
-  { value: '1d',   label: '日线'   },
-  { value: '1w',   label: '周线'   },
+  { value: '5m',   label: '5分钟'   },
+  { value: '15m',  label: '15分钟'  },
+  { value: '30m',  label: '30分钟'  },
+  { value: '60m',  label: '60分钟'  },
+  { value: '120m', label: '120分钟' },
+  { value: '240m', label: '240分钟' },
+  { value: '1d',   label: '日线'    },
+  { value: '1w',   label: '周线'    },
 ];
 
-// 只保留 4 个运算符
+// 原版只有 4 个运算符，保持不变
 const OPERATORS = [
-  { value: '>',          label: '大于 (>)'  },
-  { value: '<',          label: '小于 (<)'  },
-  { value: 'up_cross',   label: '上穿 (↑×)' },
-  { value: 'down_cross', label: '下穿 (↓×)' },
+  { value: '>',          label: '>'   },
+  { value: '<',          label: '<'   },
+  { value: 'up_cross',   label: '上穿' },
+  { value: 'down_cross', label: '下穿' },
 ];
 
-const toSelectVal  = (p: string) => p === '' ? '__main__' : p;
+const toSelectVal   = (p: string) => p === '' ? '__main__' : p;
 const fromSelectVal = (v: string) => v === '__main__' ? '' : v;
 
 // ─── 工具 ────────────────────────────────────────────────────────────────────
@@ -249,7 +250,6 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
   const [open, setOpen]     = useState(false);
   const [search, setSearch] = useState('');
 
-  // 第一次展开时加载本地品种
   useEffect(() => {
     if (open && availableSymbols.length === 0) fetchSymbols();
   }, [open, availableSymbols.length, fetchSymbols]);
@@ -406,9 +406,9 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
   );
 }
 
-// ─── 单条件行 ─────────────────────────────────────────────────────────────────
+// ─── 单条件行（两行横向布局） ─────────────────────────────────────────────────
 
-interface ConditionRowProps {
+interface ConditionRowEditorProps {
   cond: ConditionRow;
   mainPeriod: string;
   onChange: (c: ConditionRow) => void;
@@ -417,10 +417,10 @@ interface ConditionRowProps {
   index: number;
 }
 
-function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, index }: ConditionRowProps) {
+function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, index }: ConditionRowEditorProps) {
   const update = (patch: Partial<ConditionRow>) => onChange({ ...cond, ...patch });
 
-  const lines  = INDICATOR_GROUPS[cond.indicator].lines;
+  const lines    = INDICATOR_GROUPS[cond.indicator].lines;
   const isLinked = cond.period !== '' && cond.period !== mainPeriod;
   const linkPeriodOptions = LINK_PERIODS.filter(p => p.value === '__main__' || p.value !== mainPeriod);
 
@@ -430,10 +430,13 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
   };
 
   return (
-    <div className={`rounded-lg border p-3 space-y-2.5 ${isLinked ? 'border-primary/40 bg-primary/5' : 'bg-muted/20'}`}>
+    <div className={cn(
+      'rounded-lg border p-3 space-y-1.5',
+      isLinked ? 'border-primary/40 bg-primary/5' : 'bg-muted/20'
+    )}>
 
       {/* 条件序号 + 联动标签 + 删除按钮 */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mb-0.5">
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold text-muted-foreground bg-muted rounded px-1.5 py-0.5">
             条件 {index + 1}
@@ -455,31 +458,38 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
         )}
       </div>
 
-      {/* ① 周期 + 指标（一行两列） */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1">
-          <Label className="text-[10px] text-muted-foreground flex items-center gap-1">
-            <Layers className="h-2.5 w-2.5" /> 联动周期
-          </Label>
-          <Select
-            value={toSelectVal(cond.period)}
-            onValueChange={v => update({ period: fromSelectVal(v) })}
-          >
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent position="popper" className="z-[999]">
-              {linkPeriodOptions.map(p => (
-                <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+      {/* ══ 第一行：联动周期（独占整行） ══════════════════════════════════════ */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-0.5">
+          <Layers className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
+          <span className="text-[9px] text-muted-foreground">联动周期</span>
         </div>
+        <Select
+          value={toSelectVal(cond.period)}
+          onValueChange={v => update({ period: fromSelectVal(v) })}
+        >
+          <SelectTrigger className="h-8 text-xs bg-background/60 border-border/50 w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" className="z-[999]">
+            {linkPeriodOptions.map(p => (
+              <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
-        <div className="space-y-1">
-          <Label className="text-[10px] text-muted-foreground">指标</Label>
+      {/* ══ 5列：label 在上 control 在下 ══════════════════════════════════════
+          [指标]   [左值]   [运算符]   [右值]        [具体值]
+          [MACD▾] [DIF▾]  [(>)▾]    [数值|指标线▾] [0 / TRMA▾]
+      ═════════════════════════════════════════════════════════════════════ */}
+      <div className="grid grid-cols-5 gap-1">
+
+        {/* ① 指标 */}
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-[9px] text-muted-foreground truncate px-0.5">指标</span>
           <Select value={cond.indicator} onValueChange={v => handleIndicatorChange(v as IndicatorKey)}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-8 text-[11px] px-1.5 bg-background/60 border-border/50 w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper" className="z-[999]">
@@ -489,14 +499,12 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
             </SelectContent>
           </Select>
         </div>
-      </div>
 
-      {/* ② 左值 + 运算符（一行两列） */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1">
-          <Label className="text-[10px] text-muted-foreground">左值</Label>
+        {/* ② 左值 */}
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-[9px] text-muted-foreground truncate px-0.5">左值</span>
           <Select value={cond.left} onValueChange={v => update({ left: v })}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-8 text-[11px] px-1.5 bg-background/60 border-border/50 w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper" className="z-[999]">
@@ -507,10 +515,11 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
           </Select>
         </div>
 
-        <div className="space-y-1">
-          <Label className="text-[10px] text-muted-foreground">运算符</Label>
+        {/* ③ 运算符 */}
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-[9px] text-muted-foreground truncate px-0.5">运算符</span>
           <Select value={cond.operator} onValueChange={v => update({ operator: v })}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-8 text-[11px] px-1.5 bg-background/60 border-border/50 w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper" className="z-[999]">
@@ -520,53 +529,65 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
             </SelectContent>
           </Select>
         </div>
-      </div>
 
-      {/* ③ 右值类型切换 + 右值（一行） */}
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <Label className="text-[10px] text-muted-foreground">右值</Label>
-          <div className="flex gap-1">
-            {(['value', 'line'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => update({
-                  rightType: t,
-                  rightValue: t === 'value' ? '0' : (lines[1]?.value ?? lines[0]?.value ?? ''),
-                })}
-                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors
-                  ${cond.rightType === t
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'text-muted-foreground border-border hover:border-primary'
-                  }`}
-              >
-                {t === 'value' ? '数值' : '指标线'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {cond.rightType === 'value' ? (
-          <Input
-            type="number"
-            value={cond.rightValue}
-            onChange={e => update({ rightValue: e.target.value })}
-            className="h-8 text-xs"
-            placeholder="输入数值..."
-          />
-        ) : (
-          <Select value={cond.rightValue} onValueChange={v => update({ rightValue: v })}>
-            <SelectTrigger className="h-8 text-xs">
+        {/* ④ 右值类型 */}
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-[9px] text-muted-foreground truncate px-0.5">右值</span>
+          <Select
+            value={cond.rightType}
+            onValueChange={v => {
+              const t = v as 'value' | 'line';
+              update({
+                rightType:  t,
+                rightValue: t === 'value'
+                  ? '0'
+                  : (lines[1]?.value ?? lines[0]?.value ?? ''),
+              });
+            }}
+          >
+            <SelectTrigger className="h-8 text-[11px] px-1.5 bg-background/60 border-border/50 w-full">
               <SelectValue />
             </SelectTrigger>
-            {/* 右值指标线：只显示当前指标的线 */}
             <SelectContent position="popper" className="z-[999]">
-              {lines.map(l => (
-                <SelectItem key={l.value} value={l.value} className="text-xs">{l.label}</SelectItem>
-              ))}
+              <SelectItem value="value" className="text-xs">数值</SelectItem>
+              <SelectItem value="line"  className="text-xs">指标线</SelectItem>
             </SelectContent>
           </Select>
-        )}
+        </div>
+
+        {/* ⑤ 具体右值：透明占位 label 保持行高与前四列一致 */}
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-[9px] text-transparent px-0.5 select-none">占位</span>
+          {cond.rightType === 'value' ? (
+            <input
+              type="text"
+              inputMode="decimal"
+              value={cond.rightValue}
+              onChange={e => update({ rightValue: e.target.value })}
+              placeholder="0"
+              className="h-8 w-full rounded-md border border-border/50
+                         bg-background/60 px-1.5 py-0
+                         text-[11px] leading-none text-center
+                         text-foreground placeholder:text-muted-foreground
+                         outline-none focus-visible:ring-2 focus-visible:ring-ring
+                         [appearance:textfield]
+                         [&::-webkit-outer-spin-button]:appearance-none
+                         [&::-webkit-inner-spin-button]:appearance-none"
+            />
+          ) : (
+            <Select value={cond.rightValue} onValueChange={v => update({ rightValue: v })}>
+              <SelectTrigger className="h-8 text-[11px] px-1.5 bg-background/60 border-primary/40 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" className="z-[999]">
+                {lines.map(l => (
+                  <SelectItem key={l.value} value={l.value} className="text-xs">{l.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+
       </div>
     </div>
   );
@@ -602,16 +623,7 @@ export default function StrategyBuilder() {
   return (
     <div className="space-y-4">
 
-      {/* 策略名称 */}
-      <div className="space-y-1.5">
-        <Label className="text-xs font-semibold">策略名称</Label>
-        <Input
-          value={strategyName}
-          onChange={e => setStrategyName(e.target.value)}
-          className="h-8 text-sm"
-          placeholder="给你的策略起个名字..."
-        />
-      </div>
+      {/* 策略名称：仅保留状态，不渲染输入框 */}
 
       <Separator />
 
@@ -657,11 +669,12 @@ export default function StrategyBuilder() {
             <button
               key={l}
               onClick={() => setLogic(l)}
-              className={`text-xs px-3 py-1 rounded-full border transition-colors
-                ${logic === l
+              className={cn(
+                'text-xs px-3 py-1 rounded-full border transition-colors',
+                logic === l
                   ? 'bg-primary text-primary-foreground border-primary'
                   : 'text-muted-foreground border-border hover:border-primary'
-                }`}
+              )}
             >
               {l === 'AND' ? '全部满足 (AND)' : '任一满足 (OR)'}
             </button>
