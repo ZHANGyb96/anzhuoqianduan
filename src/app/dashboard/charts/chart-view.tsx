@@ -1,8 +1,21 @@
 'use client';
-import { useEffect, useState, useRef } from 'react';
+
+/**
+ * src/app/dashboard/charts/chart-view.tsx
+ *
+ * 修复：
+ *  1. 定位问题 — 通过 targetTime prop 传给 KlineChart，数据就绪后滚动到指定K线
+ *  2. 返回键无响应 — 使用 router.back()，Capacitor 无历史时 fallback 到 backtest 页
+ */
+
+import { useEffect, useState, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
+import { useRouter } from 'next/navigation';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Loader2, Settings2, Plus, Trash2, ChevronDown, AlertCircle, Star, Search, Bot } from 'lucide-react';
+import {
+  Loader2, Settings2, Plus, Trash2, ChevronDown,
+  AlertCircle, Bot, ArrowLeft,
+} from 'lucide-react';
 import { IndicatorType, indicatorList, maConfig } from '@/components/kline-chart';
 import { useAuthStore } from '@/store/useAuthStore';
 import { useMarketDataStore } from '@/store/useMarketDataStore';
@@ -15,14 +28,14 @@ import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
 import { ChartContext } from '@/lib/ai-caller';
 import type { FormattedChartData } from '@/components/kline-chart';
 import { useAIStore } from '@/store/useAIStore';
+import { useChartNavStore } from '@/store/useChartNavigationStore';
+import { Badge } from '@/components/ui/badge';
 
-// SSR 安全的动态加载（LightweightCharts 依赖 window）
 const KlineChart = dynamic(
   () => import('@/components/kline-chart').then(m => m.KlineChart),
   { ssr: false, loading: () => <Skeleton className="h-full w-full bg-transparent" /> }
 );
 
-// ── 周期 Tab 配置 ────────────────────────────────────────────────────────────
 const PERIOD_TABS = [
   { value: '1m',   label: '1分'  },
   { value: '5m',   label: '5分'  },
@@ -37,6 +50,7 @@ const PERIOD_TABS = [
 ];
 
 export default function ChartView() {
+  const router = useRouter();
   const [isClient,       setIsClient      ] = useState(false);
   const [selectedStock,  setSelectedStock ] = useState('');
   const [selectedPeriod, setSelectedPeriod] = useState('1d');
@@ -45,18 +59,39 @@ export default function ChartView() {
   const token = useAuthStore(s => s.token);
   const { availableSymbols, fetchSymbols, error: symbolsError, isLoading: symbolsLoading } = useMarketDataStore();
 
+  // ── 导航目标（来自信号明细点击）────────────────────────────────────────
+  const { target, clearTarget } = useChartNavStore();
+  const navAppliedRef = useRef(false);
+
   useEffect(() => { setIsClient(true); }, []);
 
   useEffect(() => {
     if (isClient && (token || isCapacitor)) fetchSymbols();
   }, [isClient, token, fetchSymbols]);
 
-  // 品种列表就绪后自动选第一支
+  // 品种列表就绪后：优先切换到导航目标品种，否则选第一支
   useEffect(() => {
     if (!availableSymbols.length) { setSelectedStock(''); return; }
+    if (target && !navAppliedRef.current && availableSymbols.some(s => s.value === target.stockCode)) {
+      setSelectedStock(target.stockCode);
+      setSelectedPeriod(target.period);
+      navAppliedRef.current = true;
+      return;
+    }
     if (!availableSymbols.some(s => s.value === selectedStock))
       setSelectedStock(availableSymbols[0].value);
   }, [availableSymbols]); // eslint-disable-line
+
+  // target 变化时：重置标志，并在品种列表已就绪时立即切换
+  useEffect(() => {
+    navAppliedRef.current = false;
+    if (!target || !availableSymbols.length) return;
+    if (availableSymbols.some(s => s.value === target.stockCode)) {
+      setSelectedStock(target.stockCode);
+      setSelectedPeriod(target.period);
+      navAppliedRef.current = true;
+    }
+  }, [target]); // eslint-disable-line
 
   // 切换周期时把对应 Tab 滚动到可视区
   useEffect(() => {
@@ -66,7 +101,7 @@ export default function ChartView() {
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
   }, [selectedPeriod]);
 
-  // ── 图表设置状态 ─────────────────────────────────────────────────────────
+  // ── 图表设置 ─────────────────────────────────────────────────────────────
   const [visibleMAs, setVisibleMAs] = useState<Record<string, boolean>>({
     ma5: true, ma10: true, ma20: true, ma60: true, ma120: false, ma250: false,
   });
@@ -76,12 +111,11 @@ export default function ChartView() {
   const [showBbiSignal,  setShowBbiSignal ] = useState(true);
   const [indicatorPanes, setIndicatorPanes] = useState<IndicatorType[]>(['Volume', 'MACD']);
 
-  // ── AI 分析状态 ──────────────────────────────────────────────────────────
+  // ── AI 分析 ──────────────────────────────────────────────────────────────
   const [aiPanelOpen,  setAIPanelOpen ] = useState(false);
   const [chartContext, setChartContext] = useState<ChartContext | null>(null);
   const clearMessages = useAIStore(s => s.clearMessages);
 
-  // Fix 5：切换品种或周期时清空对话，避免 AI 用旧品种的上下文回答新品种的问题
   const prevKeyRef = useRef('');
   useEffect(() => {
     const key = `${selectedStock}__${selectedPeriod}`;
@@ -92,8 +126,6 @@ export default function ChartView() {
     prevKeyRef.current = key;
   }, [selectedStock, selectedPeriod, clearMessages]);
 
-  // Fix 2：副图指标变化时同步更新 chartContext.activePanes，
-  // 避免 onDataReady 闭包只在数据加载时执行一次而导致 activePanes 永远陈旧
   useEffect(() => {
     setChartContext(prev => prev ? { ...prev, activePanes: indicatorPanes } : prev);
   }, [indicatorPanes]);
@@ -101,16 +133,13 @@ export default function ChartView() {
   const addIndicator = () => {
     if (indicatorPanes.length >= 3) return;
     const used = new Set(indicatorPanes);
-    const next = indicatorList.find(i => !used.has(i.value))?.value ?? 'RSI';
-    setIndicatorPanes(p => [...p, next]);
+    setIndicatorPanes(p => [...p, indicatorList.find(i => !used.has(i.value))?.value ?? 'RSI']);
   };
-  const removeIndicator = (idx: number) =>
-    setIndicatorPanes(p => p.filter((_, i) => i !== idx));
-  const changeIndicator = (idx: number, val: IndicatorType) =>
+  const removeIndicator = (idx: number) => setIndicatorPanes(p => p.filter((_, i) => i !== idx));
+  const changeIndicator  = (idx: number, val: IndicatorType) =>
     setIndicatorPanes(p => { const n = [...p]; n[idx] = val; return n; });
 
-  // ── AI 数据就绪回调 ──────────────────────────────────────────────────────
-  const handleDataReady = (data: FormattedChartData[]) => {
+  const handleDataReady = useCallback((data: FormattedChartData[]) => {
     const sym = availableSymbols.find(s => s.value === selectedStock);
     setChartContext({
       stockCode:   selectedStock,
@@ -118,22 +147,30 @@ export default function ChartView() {
       period:      selectedPeriod,
       activePanes: indicatorPanes,
       bars: data.map(d => ({
-        time:         String(d.time),
-        open:         d.open,  high: d.high, low: d.low, close: d.close, volume: d.volume,
-        ma5:          d.ma5,   ma10: d.ma10, ma20: d.ma20, ma60: d.ma60,
-        macd:         d.macd,  macd_signal: d.macd_signal, macd_hist: d.macd_hist,
-        kdj_k:        d.kdj_k, kdj_d: d.kdj_d, kdj_j: d.kdj_j,
-        rsi_6:        d.rsi_6, rsi_12: d.rsi_12, rsi_24: d.rsi_24,
-        boll_upper:   d.boll_upper, boll_middle: d.boll_middle, boll_lower: d.boll_lower,
-        cci:          d.cci,   bias_6: d.bias_6, bias_12: d.bias_12,
+        time: String(d.time), open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume,
+        ma5: d.ma5, ma10: d.ma10, ma20: d.ma20, ma60: d.ma60,
+        macd: d.macd, macd_signal: d.macd_signal, macd_hist: d.macd_hist,
+        kdj_k: d.kdj_k, kdj_d: d.kdj_d, kdj_j: d.kdj_j,
+        rsi_6: d.rsi_6, rsi_12: d.rsi_12, rsi_24: d.rsi_24,
+        boll_upper: d.boll_upper, boll_middle: d.boll_middle, boll_lower: d.boll_lower,
+        cci: d.cci, bias_6: d.bias_6, bias_12: d.bias_12,
       })),
     });
-  };
+  }, [availableSymbols, selectedStock, selectedPeriod, indicatorPanes]);
 
-  // ── 当前品种显示名 ───────────────────────────────────────────────────────
+  // ── 返回上一页 ─────────────────────────────────────────────────────────────
+  const handleBack = useCallback(() => {
+    clearTarget();
+    if (typeof window !== 'undefined' && window.history.length > 1) {
+      router.back();
+    } else {
+      // 在 Capacitor 中 history 可能为 1，直接跳回回测页
+      router.replace('/dashboard/backtest');
+    }
+  }, [clearTarget, router]);
+
   const currentSymbol = availableSymbols.find(s => s.value === selectedStock);
 
-  // ── Loading / Error ──────────────────────────────────────────────────────
   if (!isClient || symbolsLoading) {
     return (
       <div className="flex h-full w-full items-center justify-center">
@@ -151,54 +188,92 @@ export default function ChartView() {
     );
   }
 
+  // 只有 target 已匹配到当前品种时才传 targetTime，避免品种未切换时错误定位
+  const targetTime =
+    target && target.stockCode === selectedStock ? target.time : undefined;
+
   return (
     <div className="flex flex-col w-full flex-1 min-h-0 bg-background overflow-hidden">
 
-      {/* ══════════════════════════════════════════════════════════════
-          核心需求1：股票名称单独置顶
-          我们将把它作为顶部的标题栏，中间显示股票代码和名称
-      ══════════════════════════════════════════════════════════════ */}
+      {/* ─── 返回条：从信号明细跳转时显示 ─────────────────────────────────── */}
+      {target && (
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/20 flex-shrink-0">
+          {/* ← 返回 按钮 — 主要交互 */}
+          <button
+            onClick={handleBack}
+            className="flex items-center gap-1 text-xs font-semibold text-primary
+                       px-2.5 py-1 rounded-lg bg-primary/15 hover:bg-primary/25
+                       active:scale-95 transition-all shrink-0"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            返回
+          </button>
+
+          <span className="text-primary text-xs font-medium">信号明细跳转</span>
+
+          {target.time && (
+            <Badge variant="secondary" className="text-[10px] font-mono px-1.5 py-0">
+              {target.time.slice(0, 10)}
+            </Badge>
+          )}
+          {target.stockCode && (
+            <Badge variant="secondary" className="text-[10px] font-mono px-1.5 py-0">
+              {target.stockCode}
+            </Badge>
+          )}
+
+          <button
+            onClick={() => clearTarget()}
+            className="ml-auto text-muted-foreground hover:text-foreground text-[10px] underline shrink-0"
+          >
+            关闭
+          </button>
+        </div>
+      )}
+
+      {/* ─── 品种选择栏 ─────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-3 py-1.5 flex-shrink-0 relative z-10 bg-[#17191C]">
-          <div className="w-12 text-muted-foreground flex justify-start">
-              <ChevronDown className="h-5 w-5 rotate-90" />
-          </div>
-          
-          <div className="flex-1 flex justify-center items-center">
-              <Select value={selectedStock} onValueChange={setSelectedStock} disabled={!availableSymbols.length}>
-                  <SelectTrigger className="h-10 w-auto bg-transparent border-0 gap-0 mx-auto shadow-none focus:ring-0 flex flex-col justify-center items-center px-0 hover:bg-transparent">
-                      <div className="flex items-center gap-1">
-                          <ChevronDown className="h-4 w-4 opacity-0" />
-                          <span className="text-base font-bold text-foreground">
-                              {currentSymbol ? currentSymbol.label.replace(` (${selectedStock})`, '') : '选择品种'}
-                          </span>
-                          <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
-                      </div>
-                      {currentSymbol && (
-                          <div className="text-[10px] text-muted-foreground font-mono flex items-center gap-1 mt-0.5">
-                              {selectedStock} <span className="bg-[#5A87F7]/20 text-[#5A87F7] px-1 rounded-[2px] leading-tight text-[8px] transform scale-90">L1</span>
-                          </div>
-                      )}
-                  </SelectTrigger>
-                  <SelectContent className="max-h-72">
-                      {availableSymbols.map(s => (
-                          <SelectItem key={s.value} value={s.value} className="text-xs md:text-sm">
-                              <span className="font-mono font-bold text-primary mr-2">{s.value}</span>
-                              <span className="text-muted-foreground">{s.label.replace(` (${s.value})`, '')}</span>
-                          </SelectItem>
-                      ))}
-                  </SelectContent>
-              </Select>
-          </div>
-          
-          <div className="w-12 flex justify-end text-muted-foreground">
-              {/* 取消了收藏和搜索图标 */}
-          </div>
+        <div className="w-12 text-muted-foreground flex justify-start">
+          <ChevronDown className="h-5 w-5 rotate-90" />
+        </div>
+        <div className="flex-1 flex justify-center items-center">
+          <Select value={selectedStock} onValueChange={setSelectedStock} disabled={!availableSymbols.length}>
+            <SelectTrigger className="h-10 w-auto bg-transparent border-0 gap-0 mx-auto shadow-none focus:ring-0 flex flex-col justify-center items-center px-0 hover:bg-transparent">
+              <div className="flex items-center gap-1">
+                <ChevronDown className="h-4 w-4 opacity-0" />
+                <span className="text-base font-bold text-foreground">
+                  {currentSymbol ? currentSymbol.label.replace(` (${selectedStock})`, '') : '选择品种'}
+                </span>
+                <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
+              </div>
+              {currentSymbol && (
+                <div className="text-[10px] text-muted-foreground font-mono flex items-center gap-1 mt-0.5">
+                  {selectedStock}
+                  <span className="bg-[#5A87F7]/20 text-[#5A87F7] px-1 rounded-[2px] leading-tight text-[8px] transform scale-90">L1</span>
+                </div>
+              )}
+            </SelectTrigger>
+            <SelectContent className="max-h-72">
+              {availableSymbols.map(s => (
+                <SelectItem key={s.value} value={s.value} className="text-xs md:text-sm">
+                  <span className="font-mono font-bold text-primary mr-2">{s.value}</span>
+                  <span className="text-muted-foreground">{s.label.replace(` (${s.value})`, '')}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="w-12 flex justify-end text-muted-foreground" />
       </div>
 
-      {/* ══════════════════════════════════════════════════════════════
-          K 线图主体 —— flex-1 + min-h-0 + flex flex-col 解决移动端高度塌陷问题
-      ══════════════════════════════════════════════════════════════ */}
+      {/* ─── K 线图主体 ──────────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 flex flex-col w-full overflow-hidden">
+        {/*
+          targetTime 通过 spread 方式传入，避免 KlineChart 未声明时产生 TS 编译错误。
+          请同步在 src/components/kline-chart.tsx 中添加：
+            targetTime?: string;
+          并在数据加载完成后根据该值滚动到对应K线（见 kline-chart-PATCH说明.ts）。
+        */}
         <KlineChart
           stockCode={selectedStock}
           period={selectedPeriod}
@@ -210,8 +285,8 @@ export default function ChartView() {
           showBbiSignal={showBbiSignal}
           onChangeIndicator={changeIndicator}
           onDataReady={handleDataReady}
+          {...(targetTime ? ({ targetTime } as any) : {})}
 
-          // 顶部周期切换 + AI 按钮
           toolbar={
             <div className="flex items-center px-1 h-8 shrink-0 border-b border-white/5 bg-[#17191C] w-full gap-1">
               <div
@@ -225,10 +300,7 @@ export default function ChartView() {
                     data-period={p.value}
                     onClick={() => setSelectedPeriod(p.value)}
                     className={`shrink-0 px-3 h-full relative text-[13px] transition-colors whitespace-nowrap flex items-center justify-center bg-transparent border-none appearance-none outline-none
-                      ${selectedPeriod === p.value
-                        ? 'text-[#5A87F7] font-semibold'
-                        : 'text-muted-foreground hover:text-foreground'
-                      }`}
+                      ${selectedPeriod === p.value ? 'text-[#5A87F7] font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                     {p.label}
                     {selectedPeriod === p.value && (
@@ -238,128 +310,94 @@ export default function ChartView() {
                 ))}
               </div>
 
-              {/* AI 分析按钮 */}
+              {/* AI 按钮 */}
               <div className="flex-shrink-0 ml-1 relative z-50">
                 <button
                   onClick={() => setAIPanelOpen(true)}
-                  className={`flex items-center justify-center h-7 w-7 rounded appearance-none outline-none
-                              border transition-colors
-                              ${aiPanelOpen
-                                ? 'bg-primary/20 border-primary/50 text-primary'
-                                : 'bg-transparent border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/5'
-                              }`}
-                  title="AI 分析"
+                  className={`flex items-center justify-center h-7 w-7 rounded appearance-none outline-none border transition-colors
+                    ${aiPanelOpen ? 'bg-primary/20 border-primary/50 text-primary' : 'bg-transparent border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/5'}`}
                 >
                   <Bot className="h-3.5 w-3.5 flex-shrink-0" />
                 </button>
               </div>
 
-              {/* 设置按钮 → Bottom Sheet */}
+              {/* 设置按钮 */}
               <div className="flex-shrink-0 ml-1 relative z-50">
-                  <Sheet>
-                    <SheetTrigger asChild>
-                      <button className="flex items-center justify-center h-7 w-7 rounded bg-transparent appearance-none outline-none
-                                         text-muted-foreground hover:text-foreground
-                                         border border-white/10 hover:bg-white/5 transition-colors">
-                        <Settings2 className="h-3.5 w-3.5 flex-shrink-0" />
-                      </button>
-                    </SheetTrigger>
-                    <SheetContent side="bottom" className="rounded-t-2xl max-h-[75vh] overflow-y-auto pb-8 z-[100]">
-                  <SheetHeader className="mb-4">
-                    <SheetTitle className="text-sm">图表设置</SheetTitle>
-                  </SheetHeader>
+                <Sheet>
+                  <SheetTrigger asChild>
+                    <button className="flex items-center justify-center h-7 w-7 rounded bg-transparent appearance-none outline-none text-muted-foreground hover:text-foreground border border-white/10 hover:bg-white/5 transition-colors">
+                      <Settings2 className="h-3.5 w-3.5 flex-shrink-0" />
+                    </button>
+                  </SheetTrigger>
+                  <SheetContent side="bottom" className="rounded-t-2xl max-h-[75vh] overflow-y-auto pb-8 z-[100]">
+                    <SheetHeader className="mb-4"><SheetTitle className="text-sm">图表设置</SheetTitle></SheetHeader>
 
-                  {/* 均线开关 */}
-                  <section className="mb-5">
-                    <p className="text-[11px] font-semibold text-muted-foreground mb-3 uppercase tracking-wider">均线显示</p>
-                    <div className="grid grid-cols-3 gap-3">
-                      {Object.entries(maConfig).map(([k, c]) => (
-                        <label key={k} className="flex items-center gap-2 cursor-pointer">
-                          <Checkbox
-                            checked={!!visibleMAs[k]}
-                            onCheckedChange={v => setVisibleMAs(p => ({ ...p, [k]: !!v }))}
-                          />
-                          <span className="text-sm" style={{ color: c.color }}>{c.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </section>
+                    <section className="mb-5">
+                      <p className="text-[11px] font-semibold text-muted-foreground mb-3 uppercase tracking-wider">均线显示</p>
+                      <div className="grid grid-cols-3 gap-3">
+                        {Object.entries(maConfig).map(([k, c]) => (
+                          <label key={k} className="flex items-center gap-2 cursor-pointer">
+                            <Checkbox checked={!!visibleMAs[k]} onCheckedChange={v => setVisibleMAs(p => ({ ...p, [k]: !!v }))} />
+                            <span className="text-sm" style={{ color: c.color }}>{c.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </section>
 
-                  {/* 信号标记 */}
-                  <section className="mb-5">
-                    <p className="text-[11px] font-semibold text-muted-foreground mb-3 uppercase tracking-wider">信号标记</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      {(
-                        [
+                    <section className="mb-5">
+                      <p className="text-[11px] font-semibold text-muted-foreground mb-3 uppercase tracking-wider">信号标记</p>
+                      <div className="grid grid-cols-2 gap-3">
+                        {([
                           ['MACD 背离', showDivergence, setShowDivergence],
                           ['TRIX 信号', showTrixSignal, setShowTrixSignal],
                           ['DPO 信号',  showDpoSignal,  setShowDpoSignal ],
                           ['BBI 信号',  showBbiSignal,  setShowBbiSignal ],
-                        ] as [string, boolean, (v: boolean) => void][]
-                      ).map(([label, val, setter]) => (
-                        <label key={label} className="flex items-center gap-2 cursor-pointer">
-                          <Checkbox checked={val} onCheckedChange={v => setter(!!v)} />
-                          <span className="text-sm">{label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </section>
+                        ] as [string, boolean, (v: boolean) => void][]).map(([label, val, setter]) => (
+                          <label key={label} className="flex items-center gap-2 cursor-pointer">
+                            <Checkbox checked={val} onCheckedChange={v => setter(!!v)} />
+                            <span className="text-sm">{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </section>
 
-                  {/* 副图指标 */}
-                  <section>
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                        副图指标（最多 3 个）
-                      </p>
-                      {indicatorPanes.length < 3 && (
-                        <button
-                          onClick={addIndicator}
-                          className="flex items-center gap-1 text-xs text-primary"
-                        >
-                          <Plus className="h-3.5 w-3.5" />添加
-                        </button>
-                      )}
-                    </div>
-                    <div className="space-y-2">
-                      {indicatorPanes.map((ind, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <Select value={ind} onValueChange={v => changeIndicator(i, v as IndicatorType)}>
-                            <SelectTrigger className="flex-1 h-9 text-sm">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {indicatorList.map(item => (
-                                <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <button
-                            onClick={() => removeIndicator(i)}
-                            className="flex items-center justify-center h-9 w-9 rounded border
-                                       border-destructive/40 text-destructive/70
-                                       hover:bg-destructive/10 hover:text-destructive transition-colors"
-                          >
-                            <Trash2 className="h-4 w-4" />
+                    <section>
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">副图指标（最多 3 个）</p>
+                        {indicatorPanes.length < 3 && (
+                          <button onClick={addIndicator} className="flex items-center gap-1 text-xs text-primary">
+                            <Plus className="h-3.5 w-3.5" />添加
                           </button>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                </SheetContent>
-              </Sheet>
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        {indicatorPanes.map((ind, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <Select value={ind} onValueChange={v => changeIndicator(i, v as IndicatorType)}>
+                              <SelectTrigger className="flex-1 h-9 text-sm"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {indicatorList.map(item => (
+                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <button onClick={() => removeIndicator(i)}
+                              className="flex items-center justify-center h-9 w-9 rounded border border-destructive/40 text-destructive/70 hover:bg-destructive/10 hover:text-destructive transition-colors">
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  </SheetContent>
+                </Sheet>
               </div>
             </div>
           }
         />
       </div>
 
-      {/* ── AI 分析面板（右侧抽屉） ── */}
-      <AIAnalysisPanel
-        open={aiPanelOpen}
-        onOpenChange={setAIPanelOpen}
-        chartContext={chartContext}
-      />
+      <AIAnalysisPanel open={aiPanelOpen} onOpenChange={setAIPanelOpen} chartContext={chartContext} />
     </div>
   );
 }
-
