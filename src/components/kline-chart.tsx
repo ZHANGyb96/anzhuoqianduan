@@ -92,6 +92,59 @@ const cciConfig   = { cci: { color: '#D4D4D4', label: 'CCI' } };
 const dpoConfig   = { dpo: { color: '#F2A93B', label: 'DPO' }, madpo: { color: '#31C2F2', label: 'MADPO' } };
 const lonConfig   = { lon: { color: '#F2A93B', label: 'LONG' }, lonma: { color: '#31C2F2', label: 'MA' } };
 
+
+// ─────────────────────────────────────────────
+// ★ 新增：scrollToTargetTime
+// 图表渲染完成后，将视图滚动到指定日期的K线
+// ─────────────────────────────────────────────
+function scrollToTargetTime(
+    chart: IChartApi,
+    data: FormattedChartData[],
+    targetTime: string,
+    period: string,
+) {
+    try {
+        const dateStr = targetTime.slice(0, 10); // "YYYY-MM-DD"
+        const isDayPlus = period === '1d' || period === '1w' || period === '1M';
+        let idx = -1;
+
+        if (isDayPlus) {
+            // 日线：time 是字符串 "YYYY-MM-DD"
+            idx = data.findIndex(d => String(d.time).slice(0, 10) === dateStr);
+        } else {
+            // 分钟线：time 是 Unix 秒（数字），先精确匹配时间戳
+            const isoStr = targetTime.replace(' ', 'T') + (targetTime.includes('+') ? '' : '+08:00');
+            const targetTs = Math.floor(new Date(isoStr).getTime() / 1000);
+            if (!isNaN(targetTs)) idx = data.findIndex(d => d.time === targetTs);
+            // 精确匹配失败，按日期找当日第一根
+            if (idx < 0) {
+                idx = data.findIndex(d => {
+                    const t = typeof d.time === 'number'
+                        ? new Date((d.time as number) * 1000).toISOString().slice(0, 10)
+                        : String(d.time).slice(0, 10);
+                    return t === dateStr;
+                });
+            }
+        }
+
+        if (idx < 0) { console.warn('[KlineChart] targetTime not found:', targetTime); return; }
+
+        const ts = chart.timeScale();
+        let visibleBars = 60;
+        try {
+            const range = ts.getVisibleLogicalRange();
+            if (range) visibleBars = Math.round(range.to - range.from);
+        } catch {}
+
+        // barsFromRight = 目标 bar 距数据末尾的根数，+偏移让目标居中
+        const barsFromRight = data.length - idx - 1;
+        ts.scrollToRealTime();
+        ts.scrollToPosition(-(barsFromRight - Math.floor(visibleBars / 2)), false);
+    } catch (e) {
+        console.warn('[KlineChart] scrollToTargetTime 失败:', e);
+    }
+}
+
 // ─────────────────────────────────────────────
 // Data fetching
 // ─────────────────────────────────────────────
@@ -540,6 +593,7 @@ export function KlineChart({
     toolbar,
     onChangeIndicator,
     onDataReady,
+    targetTime,    // ★ 新增
 }: {
     stockCode: string; period: string;
     visibleMAs: Record<string, boolean>; indicatorPanes: IndicatorType[];
@@ -548,11 +602,16 @@ export function KlineChart({
     onChangeIndicator?: (idx: number, val: IndicatorType) => void;
     /** AI 分析：数据就绪后回调最新的完整数据 */
     onDataReady?: (data: FormattedChartData[]) => void;
+    /** ★ 新增：来自信号明细的跳转目标时间，格式 "YYYY-MM-DD" 或 "YYYY-MM-DD HH:mm:ss" */
+    targetTime?: string;
 }) {
     const token = useAuthStore(s => s.token);
     const containerRef = useRef<HTMLDivElement>(null);
     const mainChartRef = useRef<IChartApi | null>(null);      // 🔧 主图实例引用（供价格标签计算使用）
     const extremaRef   = useRef<SwingPoint[]>([]);             // 🔧 波段高低点数据
+    // ★ 新增：用 ref 追踪最新 targetTime，避免触发图表重建
+    const targetTimeRef = useRef<string | undefined>(targetTime);
+    useEffect(() => { targetTimeRef.current = targetTime; }, [targetTime]);
 
     type LabelPos = { x: number; y: number; price: number; type: 'high' | 'low' };
     const [labelPositions, setLabelPositions] = useState<LabelPos[]>([]); // 🔧 渲染标签的像素坐标
@@ -927,6 +986,18 @@ export function KlineChart({
                     });
                 });
                 [mainEl, ...indEls].forEach(el => ro!.observe(el));
+
+                // ★ 新增：图表初始化完成后，若有 targetTime 则执行 K 线定位
+                // 用 ref 读取最新值，不把 targetTime 加入 effect 依赖（避免重建图表）
+                if (targetTimeRef.current) {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            if (!disposed && targetTimeRef.current) {
+                                scrollToTargetTime(mainChart, data, targetTimeRef.current, period);
+                            }
+                        });
+                    });
+                }
                 
             } catch (err: any) {
                 console.error("Chart render error:", err);
@@ -946,6 +1017,18 @@ export function KlineChart({
             allCharts.forEach(c => c.remove());
         };
     }, [data, period, indicatorPanes]); // 去除了 visibleMAs 和 showDivergence 等状态
+
+    // ★ 新增 useEffect：targetTime 变化时（图表已渲染），重新执行定位
+    // 场景：同品种点击了不同信号行，targetTime 变化但图表不重建
+    useEffect(() => {
+        if (!targetTime || !mainChartRef.current || !data.length) return;
+        const timer = setTimeout(() => {
+            if (mainChartRef.current && data.length) {
+                scrollToTargetTime(mainChartRef.current, data, targetTime, period);
+            }
+        }, 150);
+        return () => clearTimeout(timer);
+    }, [targetTime, data, period]);
 
     // 3. 动态控制均线可见性 (极速响应)
     useEffect(() => {
