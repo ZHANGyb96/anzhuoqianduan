@@ -630,6 +630,8 @@ export function KlineChart({
         mas: Record<string, ISeriesApi<"Line">>;
         indicators: Record<string, ISeriesApi<any>>;
     }>({ candle: null, mas: {}, indicators: {} });
+    // ★ 存储背离等基础 markers，与跳转箭头合并，互不覆盖
+    const baseMarkersRef = useRef<LightweightCharts.SeriesMarker<LightweightCharts.Time>[]>([]);
 
     const stockLabel = STOCKS.find(s => s.value === stockCode)?.label || stockCode;
 
@@ -987,13 +989,38 @@ export function KlineChart({
                 });
                 [mainEl, ...indEls].forEach(el => ro!.observe(el));
 
-                // ★ 新增：图表初始化完成后，若有 targetTime 则执行 K 线定位
-                // 用 ref 读取最新值，不把 targetTime 加入 effect 依赖（避免重建图表）
+                // ★ 图表初始化完成后：定位到 targetTime K线 + 绘制金色箭头
                 if (targetTimeRef.current) {
                     requestAnimationFrame(() => {
                         requestAnimationFrame(() => {
                             if (!disposed && targetTimeRef.current) {
+                                // 定位滚动
                                 scrollToTargetTime(mainChart, data, targetTimeRef.current, period);
+                                // 绘制金色箭头（在图表初始化完成后立即画，避免 Effect 时序问题）
+                                const dateStr   = targetTimeRef.current.slice(0, 10);
+                                const isDayPlus = period === '1d' || period === '1w' || period === '1M';
+                                let   targetBar: FormattedChartData | undefined;
+                                if (isDayPlus) {
+                                    targetBar = data.find(d => String(d.time).slice(0, 10) === dateStr);
+                                } else {
+                                    const isoStr  = targetTimeRef.current.replace(' ', 'T') + (targetTimeRef.current.includes('+') ? '' : '+08:00');
+                                    const ts      = Math.floor(new Date(isoStr).getTime() / 1000);
+                                    targetBar = data.find(d => d.time === ts);
+                                    if (!targetBar) targetBar = data.find(d => {
+                                        const t = typeof d.time === 'number'
+                                            ? new Date((d.time as number) * 1000).toISOString().slice(0, 10)
+                                            : String(d.time).slice(0, 10);
+                                        return t === dateStr;
+                                    });
+                                }
+                                if (targetBar) {
+                                    const arrow: LightweightCharts.SeriesMarker<LightweightCharts.Time> = {
+                                        time: targetBar.time, position: 'belowBar',
+                                        color: '#FFD700', shape: 'arrowUp',
+                                        text: '▲ 信号', size: 2,
+                                    };
+                                    candleSeries.setMarkers(sortMarkers([...baseMarkersRef.current, arrow]));
+                                }
                             }
                         });
                     });
@@ -1030,6 +1057,54 @@ export function KlineChart({
         return () => clearTimeout(timer);
     }, [targetTime, data, period]);
 
+    // ★ targetTime 变化时（图表已存在，如同品种换信号行）：重新定位 + 更新箭头
+    useEffect(() => {
+        const candle = seriesRefs.current.candle;
+        const base   = baseMarkersRef.current;
+
+        if (!targetTime) {
+            if (candle && data.length) candle.setMarkers(base);
+            return;
+        }
+        if (!data.length || !candle) return;
+
+        const dateStr   = targetTime.slice(0, 10);
+        const isDayPlus = period === '1d' || period === '1w' || period === '1M';
+        let   targetBar: FormattedChartData | undefined;
+
+        if (isDayPlus) {
+            targetBar = data.find(d => String(d.time).slice(0, 10) === dateStr);
+        } else {
+            const isoStr  = targetTime.replace(' ', 'T') + (targetTime.includes('+') ? '' : '+08:00');
+            const ts      = Math.floor(new Date(isoStr).getTime() / 1000);
+            targetBar = data.find(d => d.time === ts);
+            if (!targetBar) targetBar = data.find(d => {
+                const t = typeof d.time === 'number'
+                    ? new Date((d.time as number) * 1000).toISOString().slice(0, 10)
+                    : String(d.time).slice(0, 10);
+                return t === dateStr;
+            });
+        }
+
+        if (targetBar) {
+            const arrow: LightweightCharts.SeriesMarker<LightweightCharts.Time> = {
+                time: targetBar.time, position: 'belowBar',
+                color: '#FFD700', shape: 'arrowUp',
+                text: '▲ 信号', size: 2,
+            };
+            candle.setMarkers(sortMarkers([...base, arrow]));
+        } else {
+            candle.setMarkers(base);
+        }
+
+        // 重新定位滚动
+        const timer = setTimeout(() => {
+            if (mainChartRef.current && data.length)
+                scrollToTargetTime(mainChartRef.current, data, targetTime, period);
+        }, 150);
+        return () => clearTimeout(timer);
+    }, [targetTime, data, period]);
+
     // 3. 动态控制均线可见性 (极速响应)
     useEffect(() => {
         Object.keys(seriesRefs.current.mas).forEach(key => {
@@ -1044,10 +1119,13 @@ export function KlineChart({
     useEffect(() => {
         const candle = seriesRefs.current.candle;
         if (candle && data.length) {
-            if (showDivergence) {
-                candle.setMarkers(sortMarkers(calcMacdDivergence(data)));
-            } else {
-                candle.setMarkers([]);
+            // ★ 存入 ref，供箭头 effect 合并
+            baseMarkersRef.current = showDivergence
+                ? sortMarkers(calcMacdDivergence(data))
+                : [];
+            // 若无跳转目标，直接应用基础 markers
+            if (!targetTimeRef.current) {
+                candle.setMarkers(baseMarkersRef.current);
             }
         }
     }, [showDivergence, data]);
@@ -1182,3 +1260,5 @@ export function KlineChart({
         </div>
     );
 }
+
+

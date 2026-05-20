@@ -3,15 +3,13 @@
 /**
  * src/app/dashboard/backtest/page.tsx
  *
- * 回测页面 — 支持三层导航栈
- * ─────────────────────────────────────
- * Layer 0（默认）: 策略配置 + 统计结果 Tabs
- * Layer 1: 信号明细（按特定 K 线窗口筛选）
- *   → 点击结果卡片后进入，顶部有「返回」键
- * Layer 2: 图表跳转（调用 useChartNavStore 后切换到图表 Tab）
+ * 修复：
+ *  1. viewLayer/filterWindow 改用 useBacktestViewStore（内存持久化）
+ *     → 从信号明细跳图表 router.back() 返回后，viewLayer 仍是 'filtered-signals'
+ *  2. 移动端 Sheet 改为受控，回测 COMPLETED 后自动关闭 + 切换到统计结果 Tab
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BarChart2, ListFilter, Settings2 } from "lucide-react";
@@ -19,33 +17,46 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 import { Button } from "@/components/ui/button";
 import StrategyBuilder from './strategy-builder';
 import BacktestResults from './backtest-results';
-import SignalDetails, { type FilterWindow } from './signal-details';
+import SignalDetails from './signal-details';
 import { useChartNavStore } from '@/store/useChartNavigationStore';
-
-type ViewLayer = 'results' | 'filtered-signals';
+import { useBacktestViewStore } from '@/store/useBacktestViewStore';
+import { useBacktestTaskStore } from '@/store/useBacktestTaskStore';
 
 export default function BacktestPage() {
   const router = useRouter();
   const setChartTarget = useChartNavStore(s => s.setTarget);
 
-  // ── 当前视图层 ─────────────────────────────────────────────────────────
-  const [viewLayer,     setViewLayer]     = useState<ViewLayer>('results');
-  const [activeTab,     setActiveTab]     = useState<'results' | 'signals'>('results');
-  const [filterWindow,  setFilterWindow]  = useState<FilterWindow | undefined>(undefined);
+  // ── viewLayer / filterWindow 从 Store 读取，跨路由导航不丢失 ────────────
+  // 这样从信号明细跳图表 → router.back() 返回时，仍在信号明细层
+  const { viewLayer, filterWindow, goToFilteredSignals, backToResults } = useBacktestViewStore();
+
+  // ── 本地 Tab 状态（Layer 0 内部切换，不需要跨路由持久化）──────────────
+  const [activeTab, setActiveTab] = useState<'results' | 'signals'>('results');
+
+  // ── 移动端 Sheet 受控状态 ────────────────────────────────────────────────
+  const [sheetOpen, setSheetOpen] = useState(false);
+
+  // ── ★ 回测完成后：关闭策略配置 Sheet + 切换到统计结果 Tab ──────────────
+  const task = useBacktestTaskStore(s => s.task);
+  useEffect(() => {
+    if (task?.status === 'COMPLETED') {
+      setSheetOpen(false);      // 关闭移动端策略配置 Sheet
+      setActiveTab('results');  // 切换到统计结果 Tab
+    }
+  }, [task?.status]);
 
   // ── 点击结果卡片 → 进入筛选信号明细 ────────────────────────────────────
   const handleWindowClick = useCallback((windowKey: string, windowLabel: string) => {
-    setFilterWindow({ key: windowKey, label: windowLabel });
-    setViewLayer('filtered-signals');
-  }, []);
+    goToFilteredSignals({ key: windowKey, label: windowLabel });
+  }, [goToFilteredSignals]);
 
   // ── 从信号明细返回 ──────────────────────────────────────────────────────
   const handleBackFromSignals = useCallback(() => {
-    setViewLayer('results');
-    setFilterWindow(undefined);
-  }, []);
+    backToResults();
+  }, [backToResults]);
 
   // ── 点击信号行 → 跳转到图表 ─────────────────────────────────────────────
+  // viewLayer 已写入 store，router.back() 返回时 store 保留 'filtered-signals'
   const handleGoToChart = useCallback((stockCode: string, period: string, time: string) => {
     setChartTarget({ stockCode, period, time });
     router.push('/dashboard/charts');
@@ -72,7 +83,7 @@ export default function BacktestPage() {
               信号明细 · {filterWindow?.label}
             </h1>
             <p className="text-xs text-muted-foreground mt-0.5">
-              点击任意信号行可跳转至图表对应K线
+              点击任意信号行可跳转至图表对应K线，图表页点击「返回」回到此页
             </p>
           </div>
         </div>
@@ -103,9 +114,9 @@ export default function BacktestPage() {
             构建条件，统计历史信号的胜率与收益分布
           </p>
         </div>
-        {/* 移动端策略配置入口 */}
+        {/* 移动端策略配置入口（受控 Sheet，回测完成后自动关闭） */}
         <div className="lg:hidden">
-          <Sheet>
+          <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
             <SheetTrigger asChild>
               <Button variant="outline" size="sm" className="gap-2">
                 <Settings2 className="h-4 w-4" />
