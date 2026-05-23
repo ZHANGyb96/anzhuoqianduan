@@ -4,12 +4,15 @@
  * strategy-builder.tsx
  * 批量回测策略构建器（移动端本地离线版）
  *
- * v2 更新：
- *  - 新增 TROC_S（TROC短期）和 TROC_L（TROC长期）两个指标分组
- *  - TROC_S 可用字段：troc_osc / troc_osc_ma / troc_trix_s / troc_adx_s
- *  - TROC_L 可用字段：troc_osc_l / troc_osc_ma_l / troc_trix_l / troc_phase /
- *                     troc_acc / troc_dist / troc_pct / troc_chop /
- *                     troc_swing_lo / troc_swing_hi / troc_ob_dyn / troc_os_dyn
+ * 修改记录：
+ *  [FIX-8] 补充 >=、<=、== 运算符
+ *    原 OPERATORS 只有 >、<、up_cross、down_cross 四个，
+ *    回测引擎 evalTree 已支持 >=、<=、==，但 UI 未暴露。
+ *    新增后可直接构建 adx >= 25、kdj_k <= 20 这类条件。
+ *
+ *  [FIX-9] 120m / 240m 周期无数据源警告
+ *    新浪接口最高支持 60m，腾讯 fqkline 只支持日/周/月。
+ *    选中 120m/240m 时显示橙色说明，提示需先同步 60m 合成。
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -31,15 +34,15 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
-import { PlusCircle, Trash2, Play, ChevronDown, ChevronUp, Info, Layers, Package } from 'lucide-react';
+// [FIX-9] 新增 AlertTriangle 图标
+import { PlusCircle, Trash2, Play, ChevronDown, ChevronUp, Info, Layers, Package, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ─── 类型定义 ────────────────────────────────────────────────────────────────
 
 export type IndicatorKey =
   | 'price' | 'MA' | 'MACD' | 'KDJ' | 'RSI' | 'BOLL'
-  | 'TRIX' | 'DMI' | 'BIAS' | 'BBI' | 'CCI' | 'DPO' | 'LON'
-  | 'TROC_S' | 'TROC_L';   // ← v2 新增
+  | 'TRIX' | 'DMI' | 'BIAS' | 'BBI' | 'CCI' | 'DPO' | 'LON';
 
 export type ConditionRow = {
   id: string;
@@ -172,36 +175,6 @@ const INDICATOR_GROUPS: Record<IndicatorKey, { label: string; lines: { value: st
       { value: 'lonma', label: 'LONMA' },
     ],
   },
-
-  // ── v2 新增：TROC 短期 ──────────────────────────────────────────────────────
-  TROC_S: {
-    label: 'TROC短期',
-    lines: [
-      { value: 'troc_osc',    label: 'OSC短期'   },   // Z-score合成振荡线（无量纲，超买>+1.5超卖<-1.5）
-      { value: 'troc_osc_ma', label: 'OSC信号线'  },   // OSC 5周期EMA
-      { value: 'troc_trix_s', label: 'TRIX短期'  },   // 短期TRIX归一化，>0多头<0空头
-      { value: 'troc_adx_s',  label: 'ADX强度'   },   // ADX趋势强度（0~100，>25为趋势市）
-    ],
-  },
-
-  // ── v2 新增：TROC 长期 ──────────────────────────────────────────────────────
-  TROC_L: {
-    label: 'TROC长期',
-    lines: [
-      { value: 'troc_osc_l',    label: 'OSC长期'    },  // 长期振荡主线（26周期参数）
-      { value: 'troc_osc_ma_l', label: 'OSC长期信号' },  // 长期OSC 5周期EMA
-      { value: 'troc_trix_l',   label: 'TRIX长期'   },  // 长期TRIX归一化（18周期）
-      { value: 'troc_phase',    label: 'PHASE状态'  },  // +1吸筹 / 0中性 / -1派筹
-      { value: 'troc_acc',      label: '吸筹强度'   },  // 吸筹得分归一化（0~1）
-      { value: 'troc_dist',     label: '派筹强度'   },  // 派筹得分（0~-1，负向）
-      { value: 'troc_pct',      label: '价格分位'   },  // 历史分位 0~1（<0.3低位,>0.7高位）
-      { value: 'troc_chop',     label: '震荡指数'   },  // <38.2趋势 >61.8震荡
-      { value: 'troc_swing_lo', label: '摆动低点'   },  // 最近摆动低点（结构判断用）
-      { value: 'troc_swing_hi', label: '摆动高点'   },  // 最近摆动高点
-      { value: 'troc_ob_dyn',   label: '动态超买线' },  // 自适应超买阈值（≈+1.5~+2.5）
-      { value: 'troc_os_dyn',   label: '动态超卖线' },  // 自适应超卖阈值（≈-1.5~-2.5）
-    ],
-  },
 };
 
 const INDICATOR_LIST = Object.entries(INDICATOR_GROUPS).map(([key, val]) => ({
@@ -213,17 +186,18 @@ const INDICATOR_LIST = Object.entries(INDICATOR_GROUPS).map(([key, val]) => ({
 
 const MAX_STOCKS = 20;
 
+// [FIX-9] 增加 noSource 标记，标识无直接数据源的周期
 const PERIODS = [
-  { value: '1m',   label: '1分钟'   },
-  { value: '5m',   label: '5分钟'   },
-  { value: '15m',  label: '15分钟'  },
-  { value: '30m',  label: '30分钟'  },
-  { value: '60m',  label: '60分钟'  },
-  { value: '120m', label: '120分钟' },
-  { value: '240m', label: '240分钟' },
-  { value: '1d',   label: '日线'    },
-  { value: '1w',   label: '周线'    },
-  { value: '1M',   label: '月线'    },
+  { value: '1m',   label: '1分钟',   noSource: false },
+  { value: '5m',   label: '5分钟',   noSource: false },
+  { value: '15m',  label: '15分钟',  noSource: false },
+  { value: '30m',  label: '30分钟',  noSource: false },
+  { value: '60m',  label: '60分钟',  noSource: false },
+  { value: '120m', label: '120分钟', noSource: true  },
+  { value: '240m', label: '240分钟', noSource: true  },
+  { value: '1d',   label: '日线',    noSource: false },
+  { value: '1w',   label: '周线',    noSource: false },
+  { value: '1M',   label: '月线',    noSource: false },
 ];
 
 const LINK_PERIODS = [
@@ -238,9 +212,13 @@ const LINK_PERIODS = [
   { value: '1w',   label: '周线'    },
 ];
 
+// [FIX-8] 补充 >=、<=、== 三个运算符
 const OPERATORS = [
-  { value: '>',          label: '>'   },
-  { value: '<',          label: '<'   },
+  { value: '>',          label: '>'    },
+  { value: '>=',         label: '>='   },
+  { value: '<',          label: '<'    },
+  { value: '<=',         label: '<='   },
+  { value: '==',         label: '=='   },
   { value: 'up_cross',   label: '上穿' },
   { value: 'down_cross', label: '下穿' },
 ];
@@ -458,35 +436,12 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
     p.value === '__main__' || p.value !== mainPeriod
   );
 
-  // TROC 字段提示标签（显示在指标名旁，提示用户该字段的数值含义）
-  const trocHintMap: Record<string, string> = {
-    troc_phase:    '(+1/0/-1)',
-    troc_pct:      '(0~1)',
-    troc_chop:     '(0~100)',
-    troc_acc:      '(0~1)',
-    troc_dist:     '(0~-1)',
-    troc_ob_dyn:   '(≈+1.5~2.5)',
-    troc_os_dyn:   '(≈-2.5~-1.5)',
-    troc_adx_s:    '(0~100)',
-    troc_adx_l:    '(0~100)',
-  };
-
-  const isTroc = cond.indicator === 'TROC_S' || cond.indicator === 'TROC_L';
-
   return (
-    <div className={cn(
-      'rounded-lg border p-3 space-y-2.5 bg-card/40',
-      isTroc && 'border-blue-500/30 bg-blue-500/5',   // TROC 条件高亮边框
-    )}>
+    <div className="rounded-lg border p-3 space-y-2.5 bg-card/40">
       {/* 顶部标题行 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] text-muted-foreground font-mono">#{index + 1}</span>
-          {isTroc && (
-            <Badge variant="outline" className="text-[9px] px-1 py-0 border-blue-400/40 text-blue-400">
-              TROC
-            </Badge>
-          )}
           {cond.period !== '' && (
             <span className="flex items-center gap-0.5 text-[10px] text-primary/70">
               <Layers className="h-2.5 w-2.5" />
@@ -554,16 +509,13 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
               {lines.map(l => (
                 <SelectItem key={l.value} value={l.value} className="text-xs">
                   {l.label}
-                  {trocHintMap[l.value] && (
-                    <span className="ml-1 text-[9px] text-muted-foreground">{trocHintMap[l.value]}</span>
-                  )}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
 
-        {/* ③ 运算符 */}
+        {/* ③ 运算符 — [FIX-8] 现在包含 >=、<=、== */}
         <div className="flex flex-col gap-1 min-w-0">
           <span className="text-[9px] text-muted-foreground truncate px-0.5">运算符</span>
           <Select value={cond.operator} onValueChange={v => update({ operator: v })}>
@@ -637,14 +589,6 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
         </div>
 
       </div>
-
-      {/* TROC 字段使用提示（仅 TROC 指标显示） */}
-      {isTroc && (
-        <div className="text-[9px] text-blue-400/70 leading-relaxed">
-          {cond.indicator === 'TROC_S' && '短期振荡：OSC超买>+1.5 超卖<-1.5 · ADX>25为趋势市（信号有效区）'}
-          {cond.indicator === 'TROC_L' && 'PHASE: +1=吸筹 0=中性 -1=派筹 · 分位<0.3为历史低位 · 震荡指数>61.8为震荡行情'}
-        </div>
-      )}
     </div>
   );
 }
@@ -670,6 +614,9 @@ export default function StrategyBuilder() {
     conditions.filter(c => c.period !== '' && c.period !== mainPeriod).map(c => c.period)
   )];
 
+  // [FIX-9] 检查当前主周期是否无直接数据源
+  const periodHasNoSource = PERIODS.find(p => p.value === mainPeriod)?.noSource ?? false;
+
   const handleSubmit = () => {
     if (stockCodes.length === 0) { alert('请至少选择 1 支品种进行回测'); return; }
     if (conditions.length === 0)  { alert('请至少添加一个策略条件'); return; }
@@ -690,15 +637,34 @@ export default function StrategyBuilder() {
       <div className="space-y-1.5">
         <Label className="text-xs font-semibold">主回测周期</Label>
         <Select value={mainPeriod} onValueChange={setMainPeriod}>
-          <SelectTrigger className="h-8 text-xs">
+          {/* [FIX-9] 选中无数据源周期时边框变橙色提示 */}
+          <SelectTrigger className={cn('h-8 text-xs', periodHasNoSource && 'border-amber-500/60')}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent position="popper" className="z-[999]">
             {PERIODS.map(p => (
-              <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>
+              <SelectItem
+                key={p.value}
+                value={p.value}
+                className={cn('text-xs', p.noSource && 'text-amber-500/80')}
+              >
+                {p.label}{p.noSource ? ' *' : ''}
+              </SelectItem>
             ))}
           </SelectContent>
         </Select>
+
+        {/* [FIX-9] 无数据源警告 */}
+        {periodHasNoSource && (
+          <Alert className="py-2 px-3 bg-amber-500/5 border-amber-500/30">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+            <AlertDescription className="text-[10px] text-amber-500/90 ml-1">
+              120m / 240m 无直接数据源（新浪最高 60m，腾讯仅日/周/月）。
+              需在「数据管理」先同步 60m 数据，系统将自动合成该周期，否则回测结果为空。
+            </AlertDescription>
+          </Alert>
+        )}
+
         {crossPeriods.length > 0 && (
           <div className="flex items-start gap-1.5 text-[10px] text-primary/80 mt-1">
             <Layers className="h-3 w-3 mt-0.5 shrink-0" />

@@ -1,57 +1,35 @@
 // src/utils/troc-math.ts
 /**
- * TROC 指标计算引擎 v1
+ * TROC 指标计算引擎 v1.1
  * ──────────────────────────────────────────────────────────────────────────
- * 将 troc_indicator_short.py / troc_indicator_long.py 完整移植到 TypeScript，
- * 集成进 ta-math.ts 的 calculateAllIndicators() 输出，
- * 使 strategy-builder 可以直接把 TROC 字段当作回测条件。
+ * 修复记录（v1 → v1.1）：
  *
- * 新增字段（挂载到 KlineItem）：
+ *  [FIX-1] _zscore：彻底消除预热期 null→0 零值污染
+ *    v1 做法：data.map(v => v ?? 0) 把预热期的 null 变成 0 再参与滚动均值/方差
+ *    问题：前几十根的 OSC 值被系统性拉低，图上出现虚假超卖区域
+ *    修复：滚动窗口内如有任何 null 则直接返回 null，不参与计算
  *
- *  短期（short）
- *  ┌─────────────────┬──────────────────────────────────────────────┐
- *  │ troc_osc        │ 短期振荡主线  (Z-score合成，无量纲)           │
- *  │ troc_osc_ma     │ OSC 5周期EMA（信号线）                        │
- *  │ troc_trix_s     │ 短期TRIX归一化（趋势参考，>0多头<0空头）        │
- *  │ troc_adx_s      │ ADX 趋势强度（0~100，>25为趋势市场）           │
- *  └─────────────────┴──────────────────────────────────────────────┘
+ *  [FIX-2] ADX 去重复计算
+ *    v1 做法：troc-math.ts 内置 _adx() 函数独立重算一遍 ADX
+ *    问题：与 ta-math.ts 的 full_adx 实现路径不同，导致副图 ADX 和 TROC 内部
+ *          ADX 存在微小数值差异；同时造成重复计算开销
+ *    修复：删除内置 _adx()，改为直接读取 calculateAllIndicators 已写入的
+ *          items[i].adx 字段（calculateTROC 在 calculateAllIndicators 之后调用）
  *
- *  长期（long）
- *  ┌─────────────────┬──────────────────────────────────────────────┐
- *  │ troc_osc_l      │ 长期振荡主线（26周期参数）                     │
- *  │ troc_osc_ma_l   │ 长期OSC 5周期EMA                             │
- *  │ troc_trix_l     │ 长期TRIX归一化（18周期）                      │
- *  │ troc_phase      │ 区间状态 +1=吸筹 / -1=派筹 / 0=中性           │
- *  │ troc_acc        │ 吸筹强度得分（0~1 归一化）                     │
- *  │ troc_dist       │ 派筹强度得分（0~-1，向下显示）                 │
- *  │ troc_pct        │ 价格历史分位（0~1，<0.3低位区, >0.7高位区）     │
- *  │ troc_adx_l      │ ADX 长期趋势强度                              │
- *  │ troc_chop       │ 震荡指数（<38.2趋势,>61.8震荡）               │
- *  │ troc_swing_lo   │ 最近摆动低点（ffill，用于结构判断）             │
- *  │ troc_swing_hi   │ 最近摆动高点（ffill，用于结构判断）             │
- *  │ troc_ob_dyn     │ 动态超买线（随波动率自适应）                    │
- *  │ troc_os_dyn     │ 动态超卖线（随波动率自适应）                    │
- *  └─────────────────┴──────────────────────────────────────────────┘
+ *  [FIX-3] _swingLow / _swingHigh：消除 spread 运算符
+ *    v1 做法：Math.min(...winL) / Math.max(...winR)，每根K线都创建切片数组+spread
+ *    修复：改为 for 循环，消除不必要的数组分配和 GC 压力
  *
- *  swing_mode 参数：
- *    'review' （默认）: left=2, right=2 / left=5, right=5
- *                       历史复盘模式，包含未来 N 根确认，图形干净
- *    'live'            : right=0，纯左侧判断，实盘/回测模式
+ *  [FIX-4] _rollStd：注释与实现对齐
+ *    v1 注释写"ddof=0 总体标准差"，但实现是 sum/(n-1)（ddof=1 样本标准差）
+ *    修复：注释改为"ddof=1 样本标准差，对齐 pandas rolling.std() 默认行为"
  *
  * ──────────────────────────────────────────────────────────────────────────
- * 设计说明：
- *  1. 全部使用纯数组运算，无 pandas 依赖
- *  2. price_percentile 使用滑动排序窗口（O(n·n_window)），避免 O(n²) 问题
- *  3. ADX 直接复用 calculateAllIndicators 已有的 full_adx 字段（传参复用）
- *  4. Choppiness Index = 100 × log10(ATR_sum / (highest - lowest)) / log10(n)
- *     n=14，值域 0~100，< 38.2 趋势，> 61.8 震荡
- *  5. 动态阈值 troc_ob_dyn / troc_os_dyn = ±(1.5 + osc_std * 0.5)
- *     基于 OSC 自身的滚动标准差做包络扩张/收缩
  */
 
 import type { KlineItem } from './ta-math'
 
-// ─── 内部工具函数（不导出，供本模块内部使用）──────────────────────────────────
+// ─── 内部工具函数 ─────────────────────────────────────────────────────────────
 
 /** 等权 EMA，multiplier = 2/(n+1)，对齐 pandas ewm(span=n, adjust=False) */
 function _ema(data: number[], n: number): (number | null)[] {
@@ -78,7 +56,10 @@ function _sma(data: number[], n: number): (number | null)[] {
     return out
 }
 
-/** 滚动标准差（总体标准差，ddof=0，对齐 pandas rolling.std(ddof=0)）*/
+/**
+ * 滚动标准差（样本标准差，ddof=1，对齐 pandas rolling(n).std() 默认行为）
+ * [FIX-4] 注释从"ddof=0"修正为"ddof=1"，与实现保持一致
+ */
 function _rollStd(data: number[], n: number): (number | null)[] {
     const ma = _sma(data, n)
     const out: (number | null)[] = new Array(data.length).fill(null)
@@ -86,23 +67,69 @@ function _rollStd(data: number[], n: number): (number | null)[] {
         let sum = 0
         const m = ma[i]!
         for (let j = 0; j < n; j++) sum += (data[i - j] - m) ** 2
-        // [F1] 样本标准差（ddof=1），对齐 pandas rolling(n).std() 默认行为
+        // ddof=1：除以 (n-1)，对齐 pandas rolling(n).std() 的无偏估计
         out[i] = n > 1 ? Math.sqrt(sum / (n - 1)) : 0
     }
     return out
 }
 
-/** Z-score 归一化：(x - rolling_mean) / rolling_std */
+/**
+ * Z-score 归一化：(x - rolling_mean) / rolling_std
+ *
+ * [FIX-1] 彻底消除预热期 null→0 零值污染
+ *
+ * v1 问题：data.map(v => v ?? 0) 把预热期（前 n_period-1 根）的 null 全部替换为 0，
+ * 这些 0 进入了滚动均值/方差的计算窗口，导致：
+ *   - 前 n_z 根的 rolling_mean 被人为压低（0 拉低均值）
+ *   - rolling_std 被人为膨胀（0 与真实均值的偏差很大）
+ *   - 最终 Z-score 在序列前期出现系统性偏差，图上呈现虚假超卖/超买
+ *
+ * v1.1 修复：窗口内有任何 null 则整个窗口输出 null，不污染统计量。
+ * 在线单遍扫描，O(n) 空间，无额外数组分配。
+ */
 function _zscore(data: (number | null)[], n: number): (number | null)[] {
-    const clean = data.map(v => v ?? 0)
-    const ma    = _sma(clean, n)
-    const std   = _rollStd(clean, n)
-    return data.map((orig, i) => {
-        // [F2] 原始值为 null，输出 null，不用被污染的 rolling 结果
-        if (orig == null) return null
-        if (ma[i] == null || std[i] == null || std[i]! === 0) return null
-        return (orig - ma[i]!) / std[i]!
-    })
+    const out: (number | null)[] = new Array(data.length).fill(null)
+
+    // 滑动窗口：维护当前窗口的 sum 和 sum² 以及有效值计数
+    let wSum = 0, wSum2 = 0, nullCnt = 0
+
+    for (let i = 0; i < data.length; i++) {
+        // 加入新值
+        const cur = data[i]
+        if (cur == null) {
+            nullCnt++
+            // null 占位：用 0 维护窗口长度（不影响最终判断，因为 nullCnt > 0 时跳过）
+            wSum  += 0
+            wSum2 += 0
+        } else {
+            wSum  += cur
+            wSum2 += cur * cur
+        }
+
+        // 移除最旧值（超出窗口后）
+        if (i >= n) {
+            const old = data[i - n]
+            if (old == null) {
+                nullCnt--
+            } else {
+                wSum  -= old
+                wSum2 -= old * old
+            }
+        }
+
+        // 窗口未满或含 null → 不输出
+        if (i < n - 1 || nullCnt > 0 || cur == null) continue
+
+        const mean = wSum / n
+        // ddof=1 样本方差（与 _rollStd 一致）
+        const variance = (wSum2 - n * mean * mean) / (n - 1)
+        const std = variance > 0 ? Math.sqrt(variance) : 0
+        if (std === 0) continue
+
+        out[i] = (cur - mean) / std
+    }
+
+    return out
 }
 
 /** TRIX(n)：三重EMA的变化率 × 100 */
@@ -138,7 +165,7 @@ function _bias(close: number[], n: number): (number | null)[] {
     return close.map((c, i) => ma[i] != null ? (c - ma[i]!) / ma[i]! * 100 : null)
 }
 
-/** DPO(n)：close - MA(n).shift(n/2+1) */
+/** DPO(n)：close - MA(n).shift(floor(n/2)+1) */
 function _dpo(close: number[], n: number): (number | null)[] {
     const shift = Math.floor(n / 2) + 1
     const ma    = _sma(close, n)
@@ -150,12 +177,8 @@ function _dpo(close: number[], n: number): (number | null)[] {
 }
 
 /**
- * 价格历史分位：当前收盘价在过去 n 根中的百分位（0~1）
- * 使用插入排序维护滑动有序数组，O(n×window) 而非 O(n²)
- */
-/**
- * 价格历史分位（0~1）— 修复版
- * 用 {val, idx} 对象数组维护有序窗口，按原始索引精确删除最旧值，
+ * 价格历史分位（0~1）
+ * 用 {val, idx} 对象数组维护有序窗口，按原始索引精确删除最旧值。
  * 解决重复价格时二分查找可能删错位置的问题。O(n×window)
  */
 function _pricePercentile(close: number[], n: number): (number | null)[] {
@@ -199,38 +222,61 @@ function _pricePercentile(close: number[], n: number): (number | null)[] {
 
 /**
  * 摆动低点（滑动扫描）
- * mode='review': right > 0，需要后方确认根数（历史复盘/图表显示用）
- * mode='live':   right = 0，纯左侧判断（回测/实盘用，无未来函数）
- * 返回数组：非摆动点处为 null（注意：不做 ffill，由调用方按需处理）
+ * [FIX-3] 将 Math.min(...winL) / Math.min(...winR) 替换为 for 循环，
+ * 消除每根K线的数组切片+spread分配，减少 GC 压力。
  */
 function _swingLow(
     low: number[], left: number, right: number
 ): (number | null)[] {
     const out: (number | null)[] = new Array(low.length).fill(null)
     const end = low.length - right
+
     for (let i = left; i < end; i++) {
-        const winL = low.slice(i - left, i)
-        const winR = right > 0 ? low.slice(i + 1, i + right + 1) : []
-        const isMin =
-            (winL.length === 0 || low[i] <= Math.min(...winL)) &&
-            (winR.length === 0 || low[i] <= Math.min(...winR))
-        if (isMin) out[i] = low[i]
+        // 左侧窗口最小值
+        let minL = Infinity
+        for (let j = i - left; j < i; j++) {
+            if (low[j] < minL) minL = low[j]
+        }
+        // 右侧窗口最小值（live 模式 right=0 跳过）
+        let minR = Infinity
+        if (right > 0) {
+            for (let j = i + 1; j <= i + right; j++) {
+                if (low[j] < minR) minR = low[j]
+            }
+        }
+
+        const leftOk  = left  === 0 || low[i] <= minL
+        const rightOk = right === 0 || low[i] <= minR
+        if (leftOk && rightOk) out[i] = low[i]
     }
     return out
 }
 
+/**
+ * 摆动高点（滑动扫描）
+ * [FIX-3] 同 _swingLow，替换 spread 为 for 循环
+ */
 function _swingHigh(
     high: number[], left: number, right: number
 ): (number | null)[] {
     const out: (number | null)[] = new Array(high.length).fill(null)
     const end = high.length - right
+
     for (let i = left; i < end; i++) {
-        const winL = high.slice(i - left, i)
-        const winR = right > 0 ? high.slice(i + 1, i + right + 1) : []
-        const isMax =
-            (winL.length === 0 || high[i] >= Math.max(...winL)) &&
-            (winR.length === 0 || high[i] >= Math.max(...winR))
-        if (isMax) out[i] = high[i]
+        let maxL = -Infinity
+        for (let j = i - left; j < i; j++) {
+            if (high[j] > maxL) maxL = high[j]
+        }
+        let maxR = -Infinity
+        if (right > 0) {
+            for (let j = i + 1; j <= i + right; j++) {
+                if (high[j] > maxR) maxR = high[j]
+            }
+        }
+
+        const leftOk  = left  === 0 || high[i] >= maxL
+        const rightOk = right === 0 || high[i] >= maxR
+        if (leftOk && rightOk) out[i] = high[i]
     }
     return out
 }
@@ -257,50 +303,6 @@ function _atr(items: KlineItem[], n: number): (number | null)[] {
         ))
     }
     return _ema(tr, n)
-}
-
-/**
- * ADX(n)：复用 ta-math 里的 sma_recursive 逻辑，
- * 直接在本模块内独立实现，避免循环依赖
- */
-function _adx(items: KlineItem[], n = 14): (number | null)[] {
-    const highs  = items.map(d => d.high)
-    const lows   = items.map(d => d.low)
-    const closes = items.map(d => d.close)
-    const len    = closes.length
-
-    const tr: number[] = [0], pDm: number[] = [0], mDm: number[] = [0]
-    for (let i = 1; i < len; i++) {
-        tr.push(Math.max(
-            highs[i] - lows[i],
-            Math.abs(highs[i] - closes[i - 1]),
-            Math.abs(lows[i]  - closes[i - 1]),
-        ))
-        const up   = highs[i] - highs[i - 1]
-        const down = lows[i - 1] - lows[i]
-        pDm.push(up > down && up > 0 ? up : 0)
-        mDm.push(down > up && down > 0 ? down : 0)
-    }
-
-    // Wilder 平滑（sma_recursive 等效 alpha=1/n）
-    const wilder = (arr: number[]) => {
-        const r: number[] = [arr[0]]
-        for (let i = 1; i < arr.length; i++)
-            r.push(arr[i] / n + r[i - 1] * (1 - 1 / n))
-        return r
-    }
-    const tr14  = wilder(tr)
-    const pDm14 = wilder(pDm)
-    const mDm14 = wilder(mDm)
-
-    const dx: number[] = tr14.map((t, i) => {
-        const p = t !== 0 ? pDm14[i] / t * 100 : 0
-        const m = t !== 0 ? mDm14[i] / t * 100 : 0
-        return (p + m) !== 0 ? Math.abs(p - m) / (p + m) * 100 : 0
-    })
-
-    const adxArr = wilder(dx)
-    return adxArr.map(v => Math.round(v * 100) / 100)
 }
 
 /**
@@ -343,6 +345,7 @@ function _calcOsc(
     items: KlineItem[], n_period: number, n_z: number
 ): (number | null)[] {
     const close = items.map(d => d.close)
+    // [FIX-1] _zscore 已修复，此处无需 null→0 预处理
     const cci_z  = _zscore(_cci(items, n_period), n_z)
     const bias_z = _zscore(_bias(close, n_period), n_z)
     const dpo_z  = _zscore(_dpo(close, n_period), n_z)
@@ -354,13 +357,11 @@ function _calcOsc(
     })
 }
 
-
-// ─── K线形态确认（对齐 Python candle_confirm）──────────────────────────────────
+// ─── K线形态确认 ──────────────────────────────────────────────────────────────
 
 /**
  * 锤子线/多方吞没 → buy_candle=1
  * 射击之星/空方吞没 → sell_candle=1
- * 对齐 troc_indicator_short.py 的 candle_confirm() 函数逻辑
  */
 function _candleConfirm(items: KlineItem[]): { buy: number[]; sell: number[] } {
     const buy  = new Array(items.length).fill(0)
@@ -398,8 +399,6 @@ function _calcPhase(
     const volRatio = items.map((d, i) =>
         volMa20[i] != null && volMa20[i]! > 0 ? d.volume / volMa20[i]! : 1
     )
-
-    // 5根滑动均量比
     const volT5Ma = _sma(volRatio, 5)
 
     const trixRaw = _trix(close, 18).map(v => v ?? 0)
@@ -422,7 +421,7 @@ function _calcPhase(
         const ts  = trixSig[i]
         const tsl = trixSlp[i]
 
-        // ── 吸筹得分 ─────────────────────────────────────────────────────────
+        // ── 吸筹得分
         let acc = 0
         acc += p < 0.3 ? 30 : p < 0.45 ? 15 : 0
         acc += (tr < 0 && tsl > 0) ? 25 : (tr > 0 && tr > ts) ? 12 : 0
@@ -430,27 +429,24 @@ function _calcPhase(
         acc += vt < 0.85 ? 20 : vt < 1.0 ? 10 : 0
         accScore[i] = acc
 
-        // ── 派筹得分 ─────────────────────────────────────────────────────────
+        // ── 派筹得分
         let dist = 0
         dist += p > 0.7 ? 30 : p > 0.55 ? 15 : 0
         dist += (tr > 0 && tsl < 0) ? 25 : (tr < 0 && tr < ts) ? 12 : 0
         dist += o > 1.2 ? 25 : o > 0.6 ? 12 : 0
-        // 价格3根变化率（近似）
         const pChg = i >= 3 ? (close[i] - close[i - 3]) / close[i - 3] : 0
         dist += (vt > 1.2 && pChg < 0.015) ? 20 : vt > 1.5 ? 10 : 0
         distScore[i] = dist
 
-        // ── 状态机：滞后切换，防止频繁抖动 ──────────────────────────────────
+        // ── 状态机：滞后切换
         if (acc  >= 60) accState  = 1
         else if (acc  < 40) accState  = 0
 
         if (dist >= 60) distState = 1
         else if (dist < 40) distState = 0
 
-        // 派筹优先
         if (distState === 1) accState = 0
-
-        phase[i] = accState - distState  // +1 / 0 / -1
+        phase[i] = accState - distState
     }
 
     return { phase, accScore, distScore }
@@ -459,10 +455,16 @@ function _calcPhase(
 // ─── 主导出函数 ───────────────────────────────────────────────────────────────
 
 /**
- * 计算全部 TROC 字段并原地写入 items（与 calculateAllIndicators 风格一致）
+ * 计算全部 TROC 字段并原地写入 items
  *
- * @param items      排序好的 KlineItem 数组（需含 open/high/low/close/volume）
+ * @param items      排序好的 KlineItem 数组（需已经过 calculateAllIndicators 写入，
+ *                   以便复用 items[i].adx 字段）
  * @param swingMode  'review'（含未来确认，图表分析用）| 'live'（纯左侧，回测用）
+ *
+ * [FIX-2] ADX 去重复计算：
+ *   calculateAllIndicators 已将 full_adx 写入 items[i].adx，此处直接读取复用，
+ *   不再调用内置 _adx() 函数，消除双重计算和数值微差。
+ *   注意：calculateTROC 必须在 calculateAllIndicators 之后调用（ta-math.ts 已保证）。
  */
 export function calculateTROC(
     items: KlineItem[],
@@ -475,65 +477,59 @@ export function calculateTROC(
     const high   = items.map(d => d.high)
     const low    = items.map(d => d.low)
 
-    // ── 短期 OSC（参数14，Z窗口40）──────────────────────────────────────────
+    // ── 短期 OSC（参数14，Z窗口40）
     const oscS    = _calcOsc(items, 14, 40)
     const oscSMa  = _ema(oscS.map(v => v ?? 0), 5)
     const trixS   = _trix(close, 9)
     const trixSZ  = _zscore(trixS, 40)
 
-    // ── 长期 OSC（参数26，Z窗口80）──────────────────────────────────────────
+    // ── 长期 OSC（参数26，Z窗口80）
     const oscL    = _calcOsc(items, 26, 80)
     const oscLMa  = _ema(oscL.map(v => v ?? 0), 5)
     const trixL   = _trix(close, 18)
     const trixLZ  = _zscore(trixL, 80)
 
-    // ── ADX（短期14 / 长期用同一 ADX） ─────────────────────────────────────
-    const adxArr  = _adx(items, 14)
+    // ── [FIX-2] ADX 直接复用 calculateAllIndicators 已写入的 items[i].adx
+    // full_adx 前 14 根为 null（ta-math.ts 有 14 根 null 填充），此处保持一致
+    const adxArr: (number | null)[] = items.map(d =>
+        typeof d.adx === 'number' ? d.adx : null
+    )
 
-    // ── 震荡指数 ─────────────────────────────────────────────────────────────
+    // ── 震荡指数
     const chop    = _choppiness(items, 14)
 
-    // ── 价格历史分位（120根窗口）─────────────────────────────────────────────
+    // ── 价格历史分位（120根窗口）
     const pct     = _pricePercentile(close, 120)
 
-    // ── PHASE 状态机 ─────────────────────────────────────────────────────────
+    // ── PHASE 状态机
     const { phase, accScore, distScore } = _calcPhase(items, oscL, close)
 
-    // ── 摆动高低点 ────────────────────────────────────────────────────────────
-    // review 模式: left=5, right=5（含未来确认，图形干净）
-    // live 模式:   right=0（纯左侧判断，回测无未来函数）
-    // [F3] 删除未使用的 sLeft/sRight（短期摆动从未计算），只保留长期参数
+    // ── 摆动高低点
     const lLeft  = 5,  lRight  = swingMode === 'review' ? 5 : 0
-
-    // 长期摆动用于 PHASE 结构判断
     const swingLo = _ffill(_swingLow(low,   lLeft, lRight))
     const swingHi = _ffill(_swingHigh(high, lLeft, lRight))
 
-    // ── 短期结构判断（对齐 Python struct_long / struct_short）─────────────────
-    // struct_long  = low  > swing_lo(ffill) && vol_t < 0.9（低于摆动低点不算）
-    // struct_short = high < swing_hi(ffill) && vol_t < 0.9（突破摆动高点不算）
+    // ── 结构判断辅助
     const volMa20S  = _sma(items.map(d => d.volume), 20)
     const volRatioS = items.map((d, i) => volMa20S[i] && volMa20S[i]! > 0 ? d.volume / volMa20S[i]! : 1)
     const volT5S    = _sma(volRatioS, 5)
 
-    // ── K线形态确认 ──────────────────────────────────────────────────────────
+    // ── K线形态
     const candles = _candleConfirm(items)
 
-    // ── 短期辅助线（TRIX slope 用于触发层）──────────────────────────────────
+    // ── 短期辅助线
     const trixRawS  = _trix(close, 9).map(v => v ?? 0)
     const trixSigS  = _ema(trixRawS, 6).map(v => v ?? 0)
     const trixSlpS  = trixRawS.map((v, i) => i >= 3 ? v - trixRawS[i - 3] : 0)
     const ema60     = _ema(close, 60).map(v => v ?? 0)
 
-    // 长期辅助（TRIX slope 用于触发层）
+    // ── 长期辅助线
     const trixRawL  = _trix(close, 18).map(v => v ?? 0)
     const trixSigL  = _ema(trixRawL, 9).map(v => v ?? 0)
     const trixSlpL  = trixRawL.map((v, i) => i >= 5 ? v - trixRawL[i - 5] : 0)
     const ema120    = _ema(close, 120).map(v => v ?? 0)
 
-    // ── BUY / SELL 信号（三层过滤，对齐 Python calc_short 和 calc_long）─────
-    // 短期信号：trend_up & close>ema60 & struct_long & (osc_buy + candle + slope_buy >= 2)
-    // 长期信号：trend_up & close>ema120 & struct_long & (osc_buy + candle + slope_buy >= 2) & phase>=0
+    // ── BUY / SELL 信号（三层过滤）
     const trocBuyS:  (number | null)[] = new Array(items.length).fill(null)
     const trocSellS: (number | null)[] = new Array(items.length).fill(null)
     const trocBuyL:  (number | null)[] = new Array(items.length).fill(null)
@@ -545,7 +541,6 @@ export function calculateTROC(
         const oscSv = oscS[i] ?? 0, oscLv = oscL[i] ?? 0
         const vt    = volT5S[i] ?? 1
 
-        // 结构判断
         const sl = swingLo[i], sh = swingHi[i]
         const structLo = sl != null && low[i]  > sl && vt < 0.9 ? 1 : 0
         const structHi = sh != null && high[i] < sh && vt < 0.9 ? 1 : 0
@@ -562,12 +557,10 @@ export function calculateTROC(
 
         const trendUpS   = trixRawS[i] > 0 && trixRawS[i] > trixSigS[i]
         const trendDnS   = trixRawS[i] < 0 && trixRawS[i] < trixSigS[i]
-        if (trendUpS   && close[i] > ema60[i]  && structLo && buyCntS  >= 2)
-            trocBuyS[i]  = oscSv
-        if (trendDnS   && close[i] < ema60[i]  && structHi && sellCntS >= 2)
-            trocSellS[i] = oscSv
+        if (trendUpS   && close[i] > ema60[i]  && structLo && buyCntS  >= 2) trocBuyS[i]  = oscSv
+        if (trendDnS   && close[i] < ema60[i]  && structHi && sellCntS >= 2) trocSellS[i] = oscSv
 
-        // 长期触发层（额外要求 phase >= 0 做多 / phase <= 0 做空）
+        // 长期触发层
         const oscBuyL  = oscLv < -1.2 && oscLv > (oscL[i - 1] ?? 0) ? 1 : 0
         const oscSellL = oscLv >  1.2 && oscLv < (oscL[i - 1] ?? 0) ? 1 : 0
         const slpBuyL  = trixSlpL[i] > 0 && trixSlpL[i - 1] <= 0 ? 1 : 0
@@ -577,18 +570,15 @@ export function calculateTROC(
 
         const trendUpL   = trixRawL[i] > 0 && trixRawL[i] > trixSigL[i]
         const trendDnL   = trixRawL[i] < 0 && trixRawL[i] < trixSigL[i]
-        if (trendUpL   && close[i] > ema120[i] && structLo && buyCntL  >= 2 && phase[i] >= 0)
-            trocBuyL[i]  = oscLv
-        if (trendDnL   && close[i] < ema120[i] && structHi && sellCntL >= 2 && phase[i] <= 0)
-            trocSellL[i] = oscLv
+        if (trendUpL   && close[i] > ema120[i] && structLo && buyCntL  >= 2 && phase[i] >= 0) trocBuyL[i]  = oscLv
+        if (trendDnL   && close[i] < ema120[i] && structHi && sellCntL >= 2 && phase[i] <= 0) trocSellL[i] = oscLv
     }
 
-    // ── 动态阈值（OSC 自身的滚动标准差扩张超买超卖线）────────────────────────
-    // troc_ob_dyn = 1.5 + rollStd(OSC, 40) × 0.5，最小不低于 1.2
+    // ── 动态阈值（OSC 自身的滚动标准差扩张超买超卖线）
     const oscSClean = oscS.map(v => v ?? 0)
     const oscStd    = _rollStd(oscSClean, 40)
 
-    // ── 写入 items ─────────────────────────────────────────────────────────────
+    // ── 写入 items
     for (let i = 0; i < items.length; i++) {
         // 短期
         items[i].troc_osc     = oscS[i]    != null ? Math.round(oscS[i]!    * 10000) / 10000 : null
@@ -600,9 +590,9 @@ export function calculateTROC(
         items[i].troc_osc_l   = oscL[i]    != null ? Math.round(oscL[i]!    * 10000) / 10000 : null
         items[i].troc_osc_ma_l= oscLMa[i]  != null ? Math.round(oscLMa[i]!  * 10000) / 10000 : null
         items[i].troc_trix_l  = trixLZ[i]  != null ? Math.round(trixLZ[i]!  * 10000) / 10000 : null
-        items[i].troc_phase   = phase[i]                                        // +1 / 0 / -1
-        items[i].troc_acc     = Math.round(accScore[i]  / 100 * 1000) / 1000   // 归一化 0~1
-        items[i].troc_dist    = -(Math.round(distScore[i] / 100 * 1000) / 1000)// 负向 0~-1
+        items[i].troc_phase   = phase[i]
+        items[i].troc_acc     = Math.round(accScore[i]  / 100 * 1000) / 1000
+        items[i].troc_dist    = -(Math.round(distScore[i] / 100 * 1000) / 1000)
         items[i].troc_pct     = pct[i]     != null ? Math.round(pct[i]!     * 1000) / 1000 : null
         items[i].troc_adx_l   = adxArr[i]  != null ? Math.round(adxArr[i]!  * 100)  / 100  : null
         items[i].troc_chop    = chop[i]    != null ? Math.round(chop[i]!    * 100)  / 100  : null
@@ -616,13 +606,13 @@ export function calculateTROC(
         items[i].troc_ob_dyn    = Math.round(ob * 1000) / 1000
         items[i].troc_os_dyn    = Math.round(os * 1000) / 1000
 
-        // BUY / SELL 信号（值 = 对应 OSC 值，用于副图箭头定位；null = 无信号）
+        // BUY / SELL 信号
         items[i].troc_buy_s     = trocBuyS[i]  != null ? Math.round(trocBuyS[i]!  * 10000) / 10000 : null
         items[i].troc_sell_s    = trocSellS[i] != null ? Math.round(trocSellS[i]! * 10000) / 10000 : null
         items[i].troc_buy_l     = trocBuyL[i]  != null ? Math.round(trocBuyL[i]!  * 10000) / 10000 : null
         items[i].troc_sell_l    = trocSellL[i] != null ? Math.round(trocSellL[i]! * 10000) / 10000 : null
 
-        // 结构判断（1=结构性支撑/压力 + 缩量，0=否）
+        // 结构判断
         items[i].troc_struct_lo = trocStructLo[i]
         items[i].troc_struct_hi = trocStructHi[i]
     }
