@@ -11,6 +11,12 @@
  *  4. 对每支品种，按需加载 HTF 数据并通过 mergeCrossPeriodData() 注入 HTF 指标
  *  5. 将条件的 left/right 字段名转为 htf_<period>_<field> 格式（引擎能识别）
  *  6. 调用 runMobileBacktest() 执行回测，写入 store
+ *
+ * v3 修复：
+ *  [P1-3] 1m 数据加载量按主周期分级，由原固定 12000 条改为自适应上限，
+ *          确保分钟级统计覆盖足够的历史区间（日线约 208 交易日）。
+ *  [P3]   survivorship_warning 改为动态判断：仅当有品种因数据不足被跳过时
+ *          才显示警告，而非始终为 true。
  */
 
 import { create } from 'zustand';
@@ -68,6 +74,27 @@ const initialState: BacktestTaskState = {
 
 let pollTimeout: NodeJS.Timeout | null = null;
 
+// ─── [P1-3] 1m 数据量按主周期分级 ────────────────────────────────────────────
+// 每个交易日约 240 根 1m K 线（09:30-11:30 + 13:00-15:00）
+// 日线/周线/月线：50000 / 240 ≈ 208 交易日 ≈ 10 个月，满足多市场阶段覆盖
+// 分钟级主周期：统计窗口较短，样本密度更高，适当减少以控制内存
+const MIN1_LIMITS: Record<string, number> = {
+    '1d':   50000,
+    '1w':   50000,
+    '1M':   50000,
+    '240m': 30000,  // 30000 / 240 ≈ 125 交易日
+    '120m': 30000,
+    '60m':  30000,
+    '30m':  20000,  // 20000 / 240 ≈ 83 交易日
+    '15m':  20000,
+    '5m':   10000,  // 10000 / 240 ≈ 42 交易日
+    '1m':   10000,
+}
+
+function getMin1Limit(period: string): number {
+    return MIN1_LIMITS[period] ?? 20000
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActions>(
@@ -94,7 +121,7 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
 
             // ── 批量品种列表（兼容旧版 stockCode 单值） ──────────────────
             const stockCodes: string[] = Array.isArray(data.stockCodes) && data.stockCodes.length > 0
-                ? data.stockCodes.slice(0, 20) // 严格限制最多20支
+                ? data.stockCodes.slice(0, 20)
                 : (data as any).stockCode ? [(data as any).stockCode] : [];
 
             if (stockCodes.length === 0) {
@@ -113,25 +140,24 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
 
             // ── 构建条件树（统一转 htf_ 前缀格式） ────────────────────────
             const parsedConditions = data.conditions.map(c => {
-                // 条件有独立联动周期，且与主周期不同 → 转成 htf 字段名
                 const isLinked = c.period && c.period !== '' && c.period !== mainPeriod;
-                const prefix = isLinked ? `htf_${c.period}_` : '';
+                const prefix   = isLinked ? `htf_${c.period}_` : '';
 
-                const leftStr = `${prefix}${c.left}`;
+                const leftStr  = `${prefix}${c.left}`;
                 const rightStr =
                     c.rightType === 'line'
-                        ? `${prefix}${c.rightValue}` // 指标线也来自同一联动周期
+                        ? `${prefix}${c.rightValue}`
                         : c.rightValue;
 
                 return {
-                    left: leftStr,
-                    op:   c.operator,
+                    left:  leftStr,
+                    op:    c.operator,
                     right: c.rightType === 'value' ? Number(c.rightValue) : rightStr,
                 };
             });
 
             const finalConditionTree = {
-                logic: data.logic || 'AND',
+                logic:      data.logic || 'AND',
                 conditions: parsedConditions,
             };
 
@@ -145,7 +171,6 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                     // ── 1. 批量加载主周期数据 ──────────────────────────────
                     const primaryMap = await getKlinesForStocks(stockCodes, mainPeriod, 5000);
 
-                    // 检查是否有足够数据
                     const usableStocks = stockCodes.filter(
                         code => (primaryMap[code]?.length ?? 0) >= 50
                     );
@@ -162,9 +187,7 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                         let bars: any[] = primaryMap[code] ?? [];
 
                         if (crossPeriods.length > 0) {
-                            // 依次处理每个联动周期
                             for (const htfPeriod of crossPeriods) {
-                                // 检查本地是否有该周期数据（友好提示）
                                 const htfRaw = await getKlineFromMobileDB(code, htfPeriod, 3000);
 
                                 if (htfRaw.length < 10) {
@@ -172,9 +195,7 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                                         `[跨周期] ${code} 的 ${htfPeriod} 数据不足（${htfRaw.length}条），` +
                                         `跨周期条件可能无效。建议先同步该周期数据。`
                                     );
-                                    // 不抛出错误，允许降级（条件评估时 HTF 字段为 null → 跳过该信号）
                                 } else {
-                                    // 计算 HTF 指标后注入到主周期 bars
                                     bars = mergeCrossPeriodData(bars, htfRaw, htfPeriod, mainPeriod);
                                 }
                             }
@@ -184,12 +205,15 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                     }
 
                     // ── 3. 加载1分钟K线（用于分钟级统计，非必须）──────────
+                    // [P1-3] 按主周期动态决定 1m 数据量，覆盖足够的历史区间
                     const minuteWindows = getMinuteWindows(mainPeriod);
                     const minute1Map: Record<string, any[]> = {};
+                    const min1Limit = getMin1Limit(mainPeriod);
+
                     if (minuteWindows.length > 0) {
                         for (const code of usableStocks) {
                             try {
-                                const min1 = await getKlineFromMobileDB(code, '1m', 12000);
+                                const min1 = await getKlineFromMobileDB(code, '1m', min1Limit);
                                 if (min1.length >= 10) minute1Map[code] = min1;
                             } catch {
                                 // 无1分钟数据时分钟级统计为空，K线级统计正常
@@ -199,7 +223,6 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
 
                     // ── 4. 执行本地回测 ────────────────────────────────────
                     const totalStocks = usableStocks.length;
-                    let doneCount = 0;
 
                     const result = runMobileBacktest(
                         stocksObj,
@@ -207,21 +230,25 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                         mainPeriod,
                         finalConditionTree as any,
                         (done, total) => {
-                            doneCount = done;
                             set({ progress: { done, total } });
                         }
                     );
 
-                    const fakeTaskId = `mob_batch_${Date.now()}`;
+                    const fakeTaskId   = `mob_batch_${Date.now()}`;
+                    const skippedCount = stockCodes.length - usableStocks.length;
 
-                    // ── 4. 附加回测元信息 ──────────────────────────────────
+                    // ── 5. 附加回测元信息 ──────────────────────────────────
                     result.batch_info = {
                         requested:    stockCodes.length,
                         processed:    usableStocks.length,
-                        skipped:      stockCodes.length - usableStocks.length,
+                        skipped:      skippedCount,
                         cross_periods: crossPeriods,
                         main_period:  mainPeriod,
                     };
+
+                    // [P3] survivorship_warning 动态判断：
+                    // 仅当有品种因数据不足被跳过时才显示幸存者偏差警告
+                    result.survivorship_warning = skippedCount > 0;
 
                     set({
                         taskId: fakeTaskId,
@@ -248,7 +275,7 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
                     set({ error: e.message, isSubmitting: false, progress: null });
                 }
 
-                return; // 🔥 切断，不走 Web 路线
+                return;
             }
 
             // ====================================================================
@@ -263,7 +290,6 @@ export const useBacktestTaskStore = create<BacktestTaskState & BacktestTaskActio
 
             set({ isSubmitting: true, error: null });
 
-            // 云端只取第一支（Web 端维持原有单支逻辑）
             const singleStockCode = stockCodes[0] ?? 'ALL';
 
             try {

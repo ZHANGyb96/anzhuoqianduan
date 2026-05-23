@@ -33,6 +33,18 @@ type RawKlineData = {
     bbi?: number|null; cci?: number|null; dpo?: number|null; madpo?: number|null;
     lon?: number|null; lonma?: number|null;
     vol_ma5?: number|null; vol_ma10?: number|null;
+    // TROC 短期
+    troc_osc?: number|null; troc_osc_ma?: number|null; troc_trix_s?: number|null; troc_adx_s?: number|null;
+    // TROC 长期
+    troc_osc_l?: number|null; troc_osc_ma_l?: number|null; troc_trix_l?: number|null;
+    troc_phase?: number|null; troc_acc?: number|null; troc_dist?: number|null;
+    troc_pct?: number|null; troc_adx_l?: number|null; troc_chop?: number|null;
+    troc_swing_lo?: number|null; troc_swing_hi?: number|null;
+    troc_ob_dyn?: number|null; troc_os_dyn?: number|null;
+    // TROC 信号与结构
+    troc_buy_s?: number|null; troc_sell_s?: number|null;
+    troc_buy_l?: number|null; troc_sell_l?: number|null;
+    troc_struct_lo?: number|null; troc_struct_hi?: number|null;
 };
 
 export type FormattedChartData = CandlestickData & {
@@ -48,9 +60,21 @@ export type FormattedChartData = CandlestickData & {
     bbi?: number; cci?: number; dpo?: number; madpo?: number;
     lon?: number; lonma?: number;
     vol_ma5?: number; vol_ma10?: number;
+    // TROC 短期
+    troc_osc?: number; troc_osc_ma?: number; troc_trix_s?: number; troc_adx_s?: number;
+    // TROC 长期
+    troc_osc_l?: number; troc_osc_ma_l?: number; troc_trix_l?: number;
+    troc_phase?: number; troc_acc?: number; troc_dist?: number;
+    troc_pct?: number; troc_adx_l?: number; troc_chop?: number;
+    troc_swing_lo?: number; troc_swing_hi?: number;
+    troc_ob_dyn?: number; troc_os_dyn?: number;
+    // TROC 信号与结构
+    troc_buy_s?: number; troc_sell_s?: number;
+    troc_buy_l?: number; troc_sell_l?: number;
+    troc_struct_lo?: number; troc_struct_hi?: number;
 };
 
-export type IndicatorType = 'Volume'|'MACD'|'KDJ'|'RSI'|'TRIX'|'DMI'|'BIAS'|'BBI'|'CCI'|'DPO'|'BOLL'|'LON';
+export type IndicatorType = 'Volume'|'MACD'|'KDJ'|'RSI'|'TRIX'|'DMI'|'BIAS'|'BBI'|'CCI'|'DPO'|'BOLL'|'LON'|'TROC_S'|'TROC_L';
 
 export const indicatorList: { value: IndicatorType; label: string }[] = [
     { value: 'Volume', label: '成交量' },
@@ -64,7 +88,9 @@ export const indicatorList: { value: IndicatorType; label: string }[] = [
     { value: 'BBI',    label: 'BBI'   },
     { value: 'CCI',    label: 'CCI'   },
     { value: 'DMI',    label: 'DMI'   },
-    { value: 'LON',    label: 'LON'   },
+    { value: 'LON',    label: 'LON'      },
+    { value: 'TROC_S', label: 'TROC短期' },
+    { value: 'TROC_L', label: 'TROC长期' },
 ];
 
 const PERIOD_LABEL_MAP: Record<string, string> = {
@@ -91,6 +117,18 @@ const bbiConfig   = { bbi: { color: '#D4D4D4', label: 'BBI' }, close: { color: '
 const cciConfig   = { cci: { color: '#D4D4D4', label: 'CCI' } };
 const dpoConfig   = { dpo: { color: '#F2A93B', label: 'DPO' }, madpo: { color: '#31C2F2', label: 'MADPO' } };
 const lonConfig   = { lon: { color: '#F2A93B', label: 'LONG' }, lonma: { color: '#31C2F2', label: 'MA' } };
+const trocConfig  = {
+    osc:   { color: '#42A5F5', label: 'OSC'    },
+    oscMa: { color: '#FFB300', label: 'Signal' },
+    trix:  { color: '#78909C', label: 'TRIX'   },
+    adx:   { color: '#F2A93B', label: 'ADX'    },
+    acc:   'rgba(0,230,118,0.25)',
+    dist:  'rgba(255,23,68,0.25)',
+    phase: 'rgba(0,230,118,0.6)',
+    ob:    '#EF5350',
+    os:    '#66BB6A',
+    zero:  'rgba(255,255,255,0.25)',
+};
 
 
 // ─────────────────────────────────────────────
@@ -197,6 +235,20 @@ function transformData(d: RawKlineData, period: string): FormattedChartData | nu
         bbi: d.bbi??undefined, cci: d.cci??undefined, dpo: d.dpo??undefined, madpo: d.madpo??undefined,
         lon: d.lon??undefined, lonma: d.lonma??undefined,
         vol_ma5: d.vol_ma5??undefined, vol_ma10: d.vol_ma10??undefined,
+        // TROC 短期
+        troc_osc: d.troc_osc??undefined, troc_osc_ma: d.troc_osc_ma??undefined,
+        troc_trix_s: d.troc_trix_s??undefined, troc_adx_s: d.troc_adx_s??undefined,
+        // TROC 长期
+        troc_osc_l: d.troc_osc_l??undefined, troc_osc_ma_l: d.troc_osc_ma_l??undefined,
+        troc_trix_l: d.troc_trix_l??undefined, troc_phase: d.troc_phase??undefined,
+        troc_acc: d.troc_acc??undefined, troc_dist: d.troc_dist??undefined,
+        troc_pct: d.troc_pct??undefined, troc_adx_l: d.troc_adx_l??undefined,
+        troc_chop: d.troc_chop??undefined, troc_swing_lo: d.troc_swing_lo??undefined,
+        troc_swing_hi: d.troc_swing_hi??undefined,
+        troc_ob_dyn: d.troc_ob_dyn??undefined, troc_os_dyn: d.troc_os_dyn??undefined,
+        troc_buy_s: d.troc_buy_s??undefined, troc_sell_s: d.troc_sell_s??undefined,
+        troc_buy_l: d.troc_buy_l??undefined, troc_sell_l: d.troc_sell_l??undefined,
+        troc_struct_lo: d.troc_struct_lo??undefined, troc_struct_hi: d.troc_struct_hi??undefined,
     };
 }
 
@@ -298,6 +350,7 @@ function getPrimaryField(ind: IndicatorType): keyof FormattedChartData {
         Volume:'volume', MACD:'macd', KDJ:'kdj_k', RSI:'rsi_6',
         TRIX:'trix', DMI:'pdi', BIAS:'bias_6', BBI:'bbi',
         CCI:'cci', DPO:'dpo', BOLL:'boll_middle', LON:'lon',
+        TROC_S:'troc_osc', TROC_L:'troc_osc_l',
     };
     return map[ind];
 }
@@ -560,7 +613,7 @@ const IndLegend = memo(({
 
             {/* 参数说明 */}
             <span className="text-muted-foreground pointer-events-none">
-                {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ''}
+                {ind === 'MACD' ? '(12,26,9)' : ind === 'CCI' ? '(14)' : ind === 'KDJ' ? '(9,3,3)' : ind === 'BIAS' ? '(24)' : ind === 'TROC_S' ? 'OSC±1.5 · ADX>25信号有效' : ind === 'TROC_L' ? 'Phase+1吸/-1派 · OSC±1.5' : ''}
             </span>
 
             {/* 数值图例 */}
@@ -578,6 +631,8 @@ const IndLegend = memo(({
                     {ind === 'DPO' && row([['DPO', dpoConfig.dpo.color, currentLegend.dpo], ['MA', dpoConfig.madpo.color, currentLegend.madpo]])}
                     {ind === 'BOLL' && row([['UP', bollConfig.upper.color, currentLegend.boll_upper], ['MID', bollConfig.middle.color, currentLegend.boll_middle], ['LO', bollConfig.lower.color, currentLegend.boll_lower]])}
                     {ind === 'LON' && row([['LON', lonConfig.lon.color, currentLegend.lon], ['MA', lonConfig.lonma.color, currentLegend.lonma]])}
+                    {ind === 'TROC_S' && row([['OSC', trocConfig.osc.color, currentLegend.troc_osc], ['Sig', trocConfig.oscMa.color, currentLegend.troc_osc_ma], ['TRIX', trocConfig.trix.color, currentLegend.troc_trix_s], ['ADX', trocConfig.adx.color, currentLegend.troc_adx_s]])}
+                    {ind === 'TROC_L' && row([['OSC', trocConfig.osc.color, currentLegend.troc_osc_l], ['Sig', trocConfig.oscMa.color, currentLegend.troc_osc_ma_l], ['Phase', trocConfig.phase, currentLegend.troc_phase], ['Acc', '#00E676', currentLegend.troc_acc], ['Pct', trocConfig.trix.color, currentLegend.troc_pct]])}
                 </>
             )}
         </div>
@@ -658,7 +713,7 @@ export function KlineChart({
                     const tB = typeof b.time==='string' ? new Date(b.time).getTime() : (b.time as number);
                     return tA - tB;
                 });
-                transformed = calculateAllIndicators(transformed as any) as FormattedChartData[];
+                transformed = calculateAllIndicators(transformed as any, 'review') as FormattedChartData[];
                 const map = new Map<LightweightCharts.Time, FormattedChartData>();
                 transformed.forEach(d => map.set(d.time, d));
                 setData(transformed); dataMapRef.current = map;
@@ -886,6 +941,78 @@ export function KlineChart({
                             chart.addLineSeries({ ...sopts, color: lonConfig.lonma.color, lineWidth: 1 }).setData(safeData(data, 'lonma'));
                             chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts })
                                  .setData(data.map(d => ({ time: d.time, value: d.lon, color: (d.lon||0) >= 0 ? '#ef5350' : '#26a69a' })));
+                            break;
+                        }
+                        case 'TROC_S': {
+                            // 零轴（最底层）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.zero, lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: 0 })));
+                            // 动态超卖线（绿虚）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.os, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
+                            // 动态超买线（红虚）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.ob, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
+                            // TRIX归一化趋势线（灰）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.trix.color, lineWidth: 1 })
+                                 .setData(safeData(data, 'troc_trix_s'));
+                            // ADX线 + ADX=25 趋势/震荡分界参考线（白色点线）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.adx.color, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(safeData(data, 'troc_adx_s'));
+                            chart.addLineSeries({ ...sopts, color: 'rgba(255,255,255,0.18)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: 25 })));
+                            // OSC_MA信号线（橙）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.oscMa.color, lineWidth: 1 })
+                                 .setData(safeData(data, 'troc_osc_ma'));
+                            // OSC主线（蓝，2px，最顶层）
+                            primary = chart.addLineSeries({ ...sopts, color: trocConfig.osc.color, lineWidth: 2 });
+                            (primary as any).setData(safeData(data, 'troc_osc'));
+                            // BUY/SELL 箭头标记（对齐 Python DISPLAY_CONFIG_SHORT markers）
+                            const buyMarkersS = data
+                                .filter(d => d.troc_buy_s != null)
+                                .map(d => ({ time: d.time, position: 'belowBar' as const, color: '#00E676', shape: 'arrowUp' as const, text: 'B' }));
+                            const sellMarkersS = data
+                                .filter(d => d.troc_sell_s != null)
+                                .map(d => ({ time: d.time, position: 'aboveBar' as const, color: '#FF1744', shape: 'arrowDown' as const, text: 'S' }));
+                            (primary as any).setMarkers(sortMarkers([...buyMarkersS, ...sellMarkersS]));
+                            break;
+                        }
+                        case 'TROC_L': {
+                            // 零轴
+                            chart.addLineSeries({ ...sopts, color: trocConfig.zero, lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: 0 })));
+                            // 吸筹强度柱（浅绿，正向）
+                            chart.addHistogramSeries({ ...sopts, color: trocConfig.acc })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_acc ?? 0 })));
+                            // 派筹强度柱（浅红，负向，troc-math 已取负值）
+                            chart.addHistogramSeries({ ...sopts, color: trocConfig.dist })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_dist ?? 0 })));
+                            // 动态超卖线
+                            chart.addLineSeries({ ...sopts, color: trocConfig.os, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
+                            // 动态超买线
+                            chart.addLineSeries({ ...sopts, color: trocConfig.ob, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
+                            // PHASE状态线（±1.2缩放，在副图范围内可见）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.phase, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
+                                 .setData(data.map(d => ({ time: d.time, value: (d.troc_phase ?? 0) * 1.2 })));
+                            // TRIX长期归一化（灰）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.trix.color, lineWidth: 1 })
+                                 .setData(safeData(data, 'troc_trix_l'));
+                            // OSC_MA_L信号线（橙）
+                            chart.addLineSeries({ ...sopts, color: trocConfig.oscMa.color, lineWidth: 1 })
+                                 .setData(safeData(data, 'troc_osc_ma_l'));
+                            // OSC_L主线（蓝，2px）
+                            primary = chart.addLineSeries({ ...sopts, color: trocConfig.osc.color, lineWidth: 2 });
+                            (primary as any).setData(safeData(data, 'troc_osc_l'));
+                            // BUY/SELL 箭头标记（对齐 Python DISPLAY_CONFIG_LONG markers，L=Long长线）
+                            const buyMarkersL = data
+                                .filter(d => d.troc_buy_l != null)
+                                .map(d => ({ time: d.time, position: 'belowBar' as const, color: '#00E676', shape: 'arrowUp' as const, text: 'L' }));
+                            const sellMarkersL = data
+                                .filter(d => d.troc_sell_l != null)
+                                .map(d => ({ time: d.time, position: 'aboveBar' as const, color: '#FF1744', shape: 'arrowDown' as const, text: 'S' }));
+                            (primary as any).setMarkers(sortMarkers([...buyMarkersL, ...sellMarkersL]));
                             break;
                         }
                     }

@@ -1,8 +1,17 @@
+// src/utils/ta-math.ts
 /**
  * @fileoverview 前端本地纯血量化指标计算引擎 (TA-Math)
  * 将原本后端的 pandas_ta 计算逻辑移植到前端，实现极速的客户端动态渲染，
  * 彻底解放服务端压力，完美适配 Pure OHLCV 存储架构。
+ *
+ * v2 新增：
+ *  - 引入 calculateTROC（troc-math.ts），在 calculateAllIndicators 末尾
+ *    统一调用，所有 troc_* 字段随其他指标一并写入 items。
+ *  - swingMode 参数通过 calculateAllIndicators 的可选参数透传给 TROC 引擎，
+ *    默认 'live'（回测无未来函数），图表渲染层可传 'review'。
  */
+
+import { calculateTROC } from './troc-math'
 
 export type KlineItem = {
     time: number | string;
@@ -36,7 +45,6 @@ export function ema(data: number[], period: number): (number | null)[] {
         prevEma = (data[i] - prevEma) * multiplier + prevEma;
         result[i] = prevEma;
     }
-    // 前面不足 period 的数据也可以有初始 EMA，但通常第一根就是本值
     return result;
 }
 
@@ -70,7 +78,16 @@ export function stdev(data: number[], period: number, ma: (number|null)[]): (num
 
 // ----------------- 综合指标计算引擎 -----------------
 
-export function calculateAllIndicators(items: KlineItem[]): KlineItem[] {
+/**
+ * @param items      排序好的 KlineItem 数组
+ * @param swingMode  TROC 摆动点模式：
+ *                   'live'   - 无未来函数，用于回测（默认）
+ *                   'review' - 含右侧确认根，用于图表复盘显示
+ */
+export function calculateAllIndicators(
+    items: KlineItem[],
+    swingMode: 'live' | 'review' = 'live',
+): KlineItem[] {
     if (items.length === 0) return items;
     
     const closes = items.map(d => d.close);
@@ -99,8 +116,7 @@ export function calculateAllIndicators(items: KlineItem[]): KlineItem[] {
     const ema26 = ema(closes, 26);
     const diff = closes.map((_, i) => (ema12[i] != null && ema26[i] != null) ? ema12[i]! - ema26[i]! : null);
     
-    // EMA of Diff for Signal
-    const diff_clean = diff.map(v => v || 0); // Handle nulls for smooth EMA start
+    const diff_clean = diff.map(v => v || 0);
     const dea = ema(diff_clean, 9);
     
     // --- KDJ (9, 3, 3) ---
@@ -111,7 +127,6 @@ export function calculateAllIndicators(items: KlineItem[]): KlineItem[] {
     let prevD = 50;
     for (let i = 0; i < items.length; i++) {
         if (i < 8) {
-             // 不足9根时不严格计算，但给个基础值
              let minL = Math.min(...lows.slice(0, i+1));
              let maxH = Math.max(...highs.slice(0, i+1));
              let rsv = maxH - minL === 0 ? 0 : (closes[i] - minL) / (maxH - minL) * 100;
@@ -174,7 +189,6 @@ export function calculateAllIndicators(items: KlineItem[]): KlineItem[] {
     // --- DPO (20, 10) ---
     const dpo: (number|null)[] = new Array(closes.length).fill(null);
     for(let i=0; i<closes.length; i++) {
-        // DPO: CLOSE - REF(MA(C,20), 11)   (20/2 + 1)
         if (i >= 11 && ma20[i-11] != null) dpo[i] = closes[i] - ma20[i-11]!;
     }
     const madpo = sma(dpo.map(v => v||0), 10);
@@ -269,6 +283,10 @@ export function calculateAllIndicators(items: KlineItem[]): KlineItem[] {
         items[i].lon = lon[i];
         items[i].lonma = lonma[i];
     }
+
+    // ── TROC 指标（统一在最后调用，依赖上方已写入的字段）──────────────────────
+    // swingMode 透传：回测引擎传 'live'（无未来函数），图表显示可传 'review'
+    calculateTROC(items, swingMode);
 
     return items;
 }

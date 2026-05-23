@@ -3,6 +3,13 @@
 /**
  * strategy-builder.tsx
  * 批量回测策略构建器（移动端本地离线版）
+ *
+ * v2 更新：
+ *  - 新增 TROC_S（TROC短期）和 TROC_L（TROC长期）两个指标分组
+ *  - TROC_S 可用字段：troc_osc / troc_osc_ma / troc_trix_s / troc_adx_s
+ *  - TROC_L 可用字段：troc_osc_l / troc_osc_ma_l / troc_trix_l / troc_phase /
+ *                     troc_acc / troc_dist / troc_pct / troc_chop /
+ *                     troc_swing_lo / troc_swing_hi / troc_ob_dyn / troc_os_dyn
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -31,7 +38,8 @@ import { cn } from '@/lib/utils';
 
 export type IndicatorKey =
   | 'price' | 'MA' | 'MACD' | 'KDJ' | 'RSI' | 'BOLL'
-  | 'TRIX' | 'DMI' | 'BIAS' | 'BBI' | 'CCI' | 'DPO' | 'LON';
+  | 'TRIX' | 'DMI' | 'BIAS' | 'BBI' | 'CCI' | 'DPO' | 'LON'
+  | 'TROC_S' | 'TROC_L';   // ← v2 新增
 
 export type ConditionRow = {
   id: string;
@@ -164,6 +172,36 @@ const INDICATOR_GROUPS: Record<IndicatorKey, { label: string; lines: { value: st
       { value: 'lonma', label: 'LONMA' },
     ],
   },
+
+  // ── v2 新增：TROC 短期 ──────────────────────────────────────────────────────
+  TROC_S: {
+    label: 'TROC短期',
+    lines: [
+      { value: 'troc_osc',    label: 'OSC短期'   },   // Z-score合成振荡线（无量纲，超买>+1.5超卖<-1.5）
+      { value: 'troc_osc_ma', label: 'OSC信号线'  },   // OSC 5周期EMA
+      { value: 'troc_trix_s', label: 'TRIX短期'  },   // 短期TRIX归一化，>0多头<0空头
+      { value: 'troc_adx_s',  label: 'ADX强度'   },   // ADX趋势强度（0~100，>25为趋势市）
+    ],
+  },
+
+  // ── v2 新增：TROC 长期 ──────────────────────────────────────────────────────
+  TROC_L: {
+    label: 'TROC长期',
+    lines: [
+      { value: 'troc_osc_l',    label: 'OSC长期'    },  // 长期振荡主线（26周期参数）
+      { value: 'troc_osc_ma_l', label: 'OSC长期信号' },  // 长期OSC 5周期EMA
+      { value: 'troc_trix_l',   label: 'TRIX长期'   },  // 长期TRIX归一化（18周期）
+      { value: 'troc_phase',    label: 'PHASE状态'  },  // +1吸筹 / 0中性 / -1派筹
+      { value: 'troc_acc',      label: '吸筹强度'   },  // 吸筹得分归一化（0~1）
+      { value: 'troc_dist',     label: '派筹强度'   },  // 派筹得分（0~-1，负向）
+      { value: 'troc_pct',      label: '价格分位'   },  // 历史分位 0~1（<0.3低位,>0.7高位）
+      { value: 'troc_chop',     label: '震荡指数'   },  // <38.2趋势 >61.8震荡
+      { value: 'troc_swing_lo', label: '摆动低点'   },  // 最近摆动低点（结构判断用）
+      { value: 'troc_swing_hi', label: '摆动高点'   },  // 最近摆动高点
+      { value: 'troc_ob_dyn',   label: '动态超买线' },  // 自适应超买阈值（≈+1.5~+2.5）
+      { value: 'troc_os_dyn',   label: '动态超卖线' },  // 自适应超卖阈值（≈-1.5~-2.5）
+    ],
+  },
 };
 
 const INDICATOR_LIST = Object.entries(INDICATOR_GROUPS).map(([key, val]) => ({
@@ -200,7 +238,6 @@ const LINK_PERIODS = [
   { value: '1w',   label: '周线'    },
 ];
 
-// 原版只有 4 个运算符，保持不变
 const OPERATORS = [
   { value: '>',          label: '>'   },
   { value: '<',          label: '<'   },
@@ -238,7 +275,7 @@ function resetLinesForIndicator(indicator: IndicatorKey): Pick<ConditionRow, 'le
   };
 }
 
-// ─── 品种多选面板（纯内联展开，无 Portal/Popover，兼容 Sheet/Sidebar 任意容器） ──
+// ─── 品种多选面板 ──────────────────────────────────────────────────────────────
 
 interface StockPickerProps {
   selected: string[];
@@ -270,8 +307,6 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
 
   return (
     <div className="space-y-2">
-
-      {/* 标题栏 */}
       <div className="flex items-center justify-between">
         <Label className="text-xs font-semibold flex items-center gap-1.5">
           <Package className="h-3.5 w-3.5" />
@@ -290,7 +325,6 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
         )}
       </div>
 
-      {/* 已选标签 */}
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-1 p-2 rounded-md border bg-muted/30 min-h-[36px]">
           {selected.map(code => {
@@ -310,7 +344,6 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
         </div>
       )}
 
-      {/* 展开/收起触发按钮 */}
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
@@ -329,11 +362,8 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
         }
       </button>
 
-      {/* 内联展开列表 —— 完全在普通文档流里，无 Portal，无 z-index 问题 */}
       {open && (
         <div className="rounded-md border bg-background shadow-sm overflow-hidden">
-
-          {/* 搜索框 */}
           <div className="p-2 border-b">
             <Input
               placeholder="搜索代码或名称..."
@@ -344,14 +374,12 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
             />
           </div>
 
-          {/* 上限提示 */}
           {selected.length >= MAX_STOCKS && (
             <div className="px-3 py-1.5 text-[10px] text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 border-b">
               已达上限 {MAX_STOCKS} 支，请先点击标签移除再添加
             </div>
           )}
 
-          {/* 品种列表 */}
           <ScrollArea className="h-52">
             {isLoading ? (
               <div className="text-center text-xs text-muted-foreground py-6">加载本地品种...</div>
@@ -392,7 +420,6 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
             )}
           </ScrollArea>
 
-          {/* 底部关闭条 */}
           <div
             className="flex items-center justify-center py-1.5 border-t bg-muted/30
                        text-[10px] text-muted-foreground cursor-pointer hover:bg-muted/60 transition-colors"
@@ -406,7 +433,7 @@ function StockPicker({ selected, onChange }: StockPickerProps) {
   );
 }
 
-// ─── 单条件行（两行横向布局） ─────────────────────────────────────────────────
+// ─── 单条件行 ─────────────────────────────────────────────────────────────────
 
 interface ConditionRowEditorProps {
   cond: ConditionRow;
@@ -420,29 +447,48 @@ interface ConditionRowEditorProps {
 function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, index }: ConditionRowEditorProps) {
   const update = (patch: Partial<ConditionRow>) => onChange({ ...cond, ...patch });
 
-  const lines    = INDICATOR_GROUPS[cond.indicator].lines;
-  const isLinked = cond.period !== '' && cond.period !== mainPeriod;
-  const linkPeriodOptions = LINK_PERIODS.filter(p => p.value === '__main__' || p.value !== mainPeriod);
-
-  const handleIndicatorChange = (val: IndicatorKey) => {
-    const reset = resetLinesForIndicator(val);
-    update({ indicator: val, ...reset, rightType: 'line' });
+  const handleIndicatorChange = (indicator: IndicatorKey) => {
+    const defaults = resetLinesForIndicator(indicator);
+    update({ indicator, ...defaults, rightType: 'line' });
   };
+
+  const lines = INDICATOR_GROUPS[cond.indicator]?.lines ?? [];
+
+  const linkPeriodOptions = LINK_PERIODS.filter(p =>
+    p.value === '__main__' || p.value !== mainPeriod
+  );
+
+  // TROC 字段提示标签（显示在指标名旁，提示用户该字段的数值含义）
+  const trocHintMap: Record<string, string> = {
+    troc_phase:    '(+1/0/-1)',
+    troc_pct:      '(0~1)',
+    troc_chop:     '(0~100)',
+    troc_acc:      '(0~1)',
+    troc_dist:     '(0~-1)',
+    troc_ob_dyn:   '(≈+1.5~2.5)',
+    troc_os_dyn:   '(≈-2.5~-1.5)',
+    troc_adx_s:    '(0~100)',
+    troc_adx_l:    '(0~100)',
+  };
+
+  const isTroc = cond.indicator === 'TROC_S' || cond.indicator === 'TROC_L';
 
   return (
     <div className={cn(
-      'rounded-lg border p-3 space-y-1.5',
-      isLinked ? 'border-primary/40 bg-primary/5' : 'bg-muted/20'
+      'rounded-lg border p-3 space-y-2.5 bg-card/40',
+      isTroc && 'border-blue-500/30 bg-blue-500/5',   // TROC 条件高亮边框
     )}>
-
-      {/* 条件序号 + 联动标签 + 删除按钮 */}
-      <div className="flex items-center justify-between mb-0.5">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold text-muted-foreground bg-muted rounded px-1.5 py-0.5">
-            条件 {index + 1}
-          </span>
-          {isLinked && (
-            <span className="flex items-center gap-0.5 text-[10px] text-primary font-semibold">
+      {/* 顶部标题行 */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-muted-foreground font-mono">#{index + 1}</span>
+          {isTroc && (
+            <Badge variant="outline" className="text-[9px] px-1 py-0 border-blue-400/40 text-blue-400">
+              TROC
+            </Badge>
+          )}
+          {cond.period !== '' && (
+            <span className="flex items-center gap-0.5 text-[10px] text-primary/70">
               <Layers className="h-2.5 w-2.5" />
               {LINK_PERIODS.find(p => p.value === cond.period)?.label}
             </span>
@@ -458,7 +504,7 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
         )}
       </div>
 
-      {/* ══ 第一行：联动周期（独占整行） ══════════════════════════════════════ */}
+      {/* 联动周期 */}
       <div className="space-y-1">
         <div className="flex items-center gap-0.5">
           <Layers className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
@@ -479,10 +525,7 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
         </Select>
       </div>
 
-      {/* ══ 5列：label 在上 control 在下 ══════════════════════════════════════
-          [指标]   [左值]   [运算符]   [右值]        [具体值]
-          [MACD▾] [DIF▾]  [(>)▾]    [数值|指标线▾] [0 / TRMA▾]
-      ═════════════════════════════════════════════════════════════════════ */}
+      {/* 5列条件行 */}
       <div className="grid grid-cols-5 gap-1">
 
         {/* ① 指标 */}
@@ -509,7 +552,12 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
             </SelectTrigger>
             <SelectContent position="popper" className="z-[999]">
               {lines.map(l => (
-                <SelectItem key={l.value} value={l.value} className="text-xs">{l.label}</SelectItem>
+                <SelectItem key={l.value} value={l.value} className="text-xs">
+                  {l.label}
+                  {trocHintMap[l.value] && (
+                    <span className="ml-1 text-[9px] text-muted-foreground">{trocHintMap[l.value]}</span>
+                  )}
+                </SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -555,7 +603,7 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
           </Select>
         </div>
 
-        {/* ⑤ 具体右值：透明占位 label 保持行高与前四列一致 */}
+        {/* ⑤ 具体右值 */}
         <div className="flex flex-col gap-1 min-w-0">
           <span className="text-[9px] text-transparent px-0.5 select-none">占位</span>
           {cond.rightType === 'value' ? (
@@ -589,6 +637,14 @@ function ConditionRowEditor({ cond, mainPeriod, onChange, onRemove, canRemove, i
         </div>
 
       </div>
+
+      {/* TROC 字段使用提示（仅 TROC 指标显示） */}
+      {isTroc && (
+        <div className="text-[9px] text-blue-400/70 leading-relaxed">
+          {cond.indicator === 'TROC_S' && '短期振荡：OSC超买>+1.5 超卖<-1.5 · ADX>25为趋势市（信号有效区）'}
+          {cond.indicator === 'TROC_L' && 'PHASE: +1=吸筹 0=中性 -1=派筹 · 分位<0.3为历史低位 · 震荡指数>61.8为震荡行情'}
+        </div>
+      )}
     </div>
   );
 }
@@ -622,8 +678,6 @@ export default function StrategyBuilder() {
 
   return (
     <div className="space-y-4">
-
-      {/* 策略名称：仅保留状态，不渲染输入框 */}
 
       <Separator />
 
