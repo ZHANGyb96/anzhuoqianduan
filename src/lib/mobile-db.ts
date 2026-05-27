@@ -72,7 +72,9 @@ export async function getKlineFromMobileDB(
         return res.values ?? []
     } catch (error) {
         console.error('从本地 SQLite 读取失败:', error)
-        return []
+        // [修复3] 重新抛出，让 fetchKlineData 的 catch 捕获并展示用户友好提示；
+        //         原来的 return [] 会吞掉错误，导致上层无法区分"无数据"和"读取失败"。
+        throw error
     }
 }
 
@@ -182,3 +184,5 @@ export async function bulkInsertKlines(rows: any[]) {
         throw e
     }
 }
+
+

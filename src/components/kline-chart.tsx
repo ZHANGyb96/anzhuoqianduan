@@ -675,6 +675,12 @@ export function KlineChart({
     const dataMapRef = useRef(new Map<LightweightCharts.Time, FormattedChartData>());
     const [loading, setLoading] = useState(true);
     const [error,   setError  ] = useState<string | null>(null);
+    // ★ 核心修复：用独立信号 chartReadyKey 触发图表渲染
+    //   data 数组每次都是新引用，无法可靠作为 effect 依赖；
+    //   loading 状态在旧 WebView 的非批处理环境下会引起 cleanup→重建竞态。
+    //   改为：数据就绪后递增 chartReadyKey，图表渲染 effect 只监听这一个信号。
+    const [chartReadyKey, setChartReadyKey] = useState(0);
+    const chartDataRef = useRef<FormattedChartData[]>([]); // 渲染 effect 读取数据用 ref，不用 state
     const [renderError, setRenderError] = useState<string | null>(null);
     const [debugInfo, setDebugInfo] = useState<string>('');
     const legendDataRef = useRef<FormattedChartData | null>(null);
@@ -695,12 +701,19 @@ export function KlineChart({
         let alive = true;
         async function load() {
             if (!token && !isCapacitor) return;
-            if (!stockCode) { setData([]); dataMapRef.current = new Map(); legendDataRef.current = null; setError(null); setLoading(false); return; }
-            setLoading(true); setError(null); setData([]); dataMapRef.current = new Map(); legendDataRef.current = null;
+            if (!stockCode) {
+                setData([]); chartDataRef.current = [];
+                dataMapRef.current = new Map(); legendDataRef.current = null;
+                setError(null); setLoading(false);
+                return;
+            }
+            setLoading(true); setError(null);
+            setData([]); chartDataRef.current = [];
+            dataMapRef.current = new Map(); legendDataRef.current = null;
             try {
                 const raw = await fetchKlineData(stockCode, period, token || '');
                 if (!alive) return;
-                if (!raw.length) { setData([]); setLoading(false); return; }
+                if (!raw.length) { setData([]); chartDataRef.current = []; setLoading(false); return; }
                 let transformed = raw.map(d => transformData(d, period)).filter((d): d is FormattedChartData => d !== null);
                 
                 // 去重，由于 lightweight-charts 不允许存在重复时间戳
@@ -716,11 +729,20 @@ export function KlineChart({
                 transformed = calculateAllIndicators(transformed as any, 'review') as FormattedChartData[];
                 const map = new Map<LightweightCharts.Time, FormattedChartData>();
                 transformed.forEach(d => map.set(d.time, d));
-                setData(transformed); dataMapRef.current = map;
+
+                if (!alive) return;
+
+                // ★ 先更新 ref（渲染 effect 读取），再用 setChartReadyKey 统一触发重渲染
+                chartDataRef.current = transformed;
+                dataMapRef.current = map;
+
+                setData(transformed);          // 供 JSX 判断 data.length（决定显示暂无/图表）
+                setLoading(false);             // 关闭加载态
+                setChartReadyKey(k => k + 1); // ★ 触发图表渲染 effect（独立信号，无竞态）
+
                 if (transformed.length > 0) {
                     legendDataRef.current = transformed[transformed.length - 1];
                     updateLegendUIs.current.forEach(cb => cb());
-                    // AI 数据回调：将完整 K 线+指标数据暴露给父组件
                     onDataReady?.(transformed);
                 } else {
                     legendDataRef.current = null;
@@ -736,8 +758,11 @@ export function KlineChart({
     }, [stockCode, period, token]);
 
     // ─── 2. Chart rendering (rAF 延迟，等 flex 布局完成) ──────────
+    // ★ 只监听 chartReadyKey（数据就绪信号）、period、indicatorPanes（布局参数）
+    //   数据通过 chartDataRef.current 读取，避免 data 数组引用变化引发的重复 effect
     useEffect(() => {
-        if (loading || error || !data.length || !containerRef.current) return;
+        const chartData = chartDataRef.current;
+        if (!chartData.length || !containerRef.current) return;
 
         let disposed = false;
         let initialized = false; 
@@ -759,8 +784,17 @@ export function KlineChart({
                     .map((_, i) => root.querySelector<HTMLDivElement>(`[data-pane="ind-${i}"]`))
                     .filter(Boolean) as HTMLDivElement[];
                     
-                if (!mainEl || indEls.length !== indicatorPanes.length) return;
-                
+                // [修复2] pane 元素未找到时也加 RAF 重试，而非静默退出
+                if (!mainEl || indEls.length !== indicatorPanes.length) {
+                    if (retryCount++ > MAX_RETRY) {
+                        console.warn('Chart init aborted: pane elements not found after 60 frames.');
+                        setRenderError('布局超时：图表 pane 容器未就绪，请刷新重试');
+                        return;
+                    }
+                    rafHandle = requestAnimationFrame(initChart);
+                    return;
+                }
+
                 const { clientWidth, clientHeight } = mainEl;
                 
                 if (!clientWidth || !clientHeight) {
@@ -793,12 +827,12 @@ export function KlineChart({
                     upColor: '#ef5350', downColor: '#26a69a', borderVisible: false,
                     wickUpColor: '#ef5350', wickDownColor: '#26a69a',
                 });
-                candleSeries.setData(data);
+                candleSeries.setData(chartData);
                 seriesRefs.current.candle = candleSeries;
 
                 // 🔧 存储主图实例引用，计算波段高低点
                 mainChartRef.current = mainChart;
-                extremaRef.current = detectSwingPoints(data);
+                extremaRef.current = detectSwingPoints(chartData);
 
                 // 🔧 计算价格标签的像素坐标（在可见区域内的极值点）
                 const computeLabelPositions = () => {
@@ -825,12 +859,12 @@ export function KlineChart({
                 // MA lines - 初始化所有的 MA
                 Object.keys(maConfig).forEach(key => {
                     const s = mainChart.addLineSeries({ color: maConfig[key].color, visible: !!visibleMAs[key], ...sopts });
-                    s.setData(safeData(data, key as keyof FormattedChartData));
+                    s.setData(safeData(chartData, key as keyof FormattedChartData));
                     seriesRefs.current.mas[key] = s;
                 });
                 
                 // 初始 Divergence Marker
-                if (showDivergence) candleSeries.setMarkers(sortMarkers(calcMacdDivergence(data)));
+                if (showDivergence) candleSeries.setMarkers(sortMarkers(calcMacdDivergence(chartData)));
 
                 // ── Indicator charts ──
                 const indCharts: IChartApi[] = indEls.map((el, idx) => {
@@ -854,124 +888,124 @@ export function KlineChart({
                     switch (ind) {
                         case 'Volume': {
                             const s = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts });
-                            s.setData(data.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(239,83,80,0.7)' : 'rgba(38,166,154,0.7)' })));
-                            if (data[0]?.vol_ma5 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma5.color, lineWidth: 1 }).setData(safeData(data, 'vol_ma5'));
-                            if (data[0]?.vol_ma10 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(data, 'vol_ma10'));
+                            s.setData(chartData.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(239,83,80,0.7)' : 'rgba(38,166,154,0.7)' })));
+                            if (data[0]?.vol_ma5 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma5.color, lineWidth: 1 }).setData(safeData(chartData, 'vol_ma5'));
+                            if (data[0]?.vol_ma10 != null) chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(chartData, 'vol_ma10'));
                             primary = s; break;
                         }
                         case 'MACD': {
                             primary = chart.addLineSeries({ ...sopts, color: macdConfig.macd.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'macd'));
-                            chart.addLineSeries({ ...sopts, color: macdConfig.macd_signal.color, lineWidth: 1 }).setData(safeData(data, 'macd_signal'));
+                            (primary as any).setData(safeData(chartData, 'macd'));
+                            chart.addLineSeries({ ...sopts, color: macdConfig.macd_signal.color, lineWidth: 1 }).setData(safeData(chartData, 'macd_signal'));
                             chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts })
-                                 .setData(data.map(d => ({ time: d.time, value: d.macd_hist, color: (d.macd_hist||0) >= 0 ? '#ef5350' : '#26a69a' })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.macd_hist, color: (d.macd_hist||0) >= 0 ? '#ef5350' : '#26a69a' })));
                             break;
                         }
                         case 'KDJ': {
                             primary = chart.addLineSeries({ ...sopts, color: kdjConfig.k.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'kdj_k'));
-                            chart.addLineSeries({ ...sopts, color: kdjConfig.d.color, lineWidth: 1 }).setData(safeData(data, 'kdj_d'));
-                            chart.addLineSeries({ ...sopts, color: kdjConfig.j.color, lineWidth: 1 }).setData(safeData(data, 'kdj_j'));
-                            [20, 80].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            (primary as any).setData(safeData(chartData, 'kdj_k'));
+                            chart.addLineSeries({ ...sopts, color: kdjConfig.d.color, lineWidth: 1 }).setData(safeData(chartData, 'kdj_d'));
+                            chart.addLineSeries({ ...sopts, color: kdjConfig.j.color, lineWidth: 1 }).setData(safeData(chartData, 'kdj_j'));
+                            [20, 80].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(chartData.map(d => ({ time: d.time, value: v }))));
                             break;
                         }
                         case 'RSI': {
                             primary = chart.addLineSeries({ ...sopts, color: rsiConfig.rsi1.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'rsi_6'));
-                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi2.color, lineWidth: 1 }).setData(safeData(data, 'rsi_12'));
-                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi3.color, lineWidth: 1 }).setData(safeData(data, 'rsi_24'));
-                            [30, 70].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            (primary as any).setData(safeData(chartData, 'rsi_6'));
+                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi2.color, lineWidth: 1 }).setData(safeData(chartData, 'rsi_12'));
+                            chart.addLineSeries({ ...sopts, color: rsiConfig.rsi3.color, lineWidth: 1 }).setData(safeData(chartData, 'rsi_24'));
+                            [30, 70].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.3)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(chartData.map(d => ({ time: d.time, value: v }))));
                             break;
                         }
                         case 'TRIX': {
                             primary = chart.addLineSeries({ ...sopts, color: trixConfig.trix.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'trix'));
-                            if (showTrixSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(data, 'trix', 'trma')));
-                            chart.addLineSeries({ ...sopts, color: trixConfig.trma.color, lineWidth: 1 }).setData(safeData(data, 'trma'));
+                            (primary as any).setData(safeData(chartData, 'trix'));
+                            if (showTrixSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(chartData, 'trix', 'trma')));
+                            chart.addLineSeries({ ...sopts, color: trixConfig.trma.color, lineWidth: 1 }).setData(safeData(chartData, 'trma'));
                             break;
                         }
                         case 'DMI': {
                             primary = chart.addLineSeries({ ...sopts, color: dmiConfig.pdi.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'pdi'));
-                            chart.addLineSeries({ ...sopts, color: dmiConfig.mdi.color,  lineWidth: 1 }).setData(safeData(data, 'mdi'));
-                            chart.addLineSeries({ ...sopts, color: dmiConfig.adx.color,  lineWidth: 1 }).setData(safeData(data, 'adx'));
-                            chart.addLineSeries({ ...sopts, color: dmiConfig.adxr.color, lineWidth: 1 }).setData(safeData(data, 'adxr'));
+                            (primary as any).setData(safeData(chartData, 'pdi'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.mdi.color,  lineWidth: 1 }).setData(safeData(chartData, 'mdi'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.adx.color,  lineWidth: 1 }).setData(safeData(chartData, 'adx'));
+                            chart.addLineSeries({ ...sopts, color: dmiConfig.adxr.color, lineWidth: 1 }).setData(safeData(chartData, 'adxr'));
                             break;
                         }
                         case 'BIAS': {
                             primary = chart.addLineSeries({ ...sopts, color: biasConfig.bias6.color,  lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'bias_6'));
-                            chart.addLineSeries({ ...sopts, color: biasConfig.bias12.color, lineWidth: 1 }).setData(safeData(data, 'bias_12'));
-                            chart.addLineSeries({ ...sopts, color: biasConfig.bias24.color, lineWidth: 1 }).setData(safeData(data, 'bias_24'));
+                            (primary as any).setData(safeData(chartData, 'bias_6'));
+                            chart.addLineSeries({ ...sopts, color: biasConfig.bias12.color, lineWidth: 1 }).setData(safeData(chartData, 'bias_12'));
+                            chart.addLineSeries({ ...sopts, color: biasConfig.bias24.color, lineWidth: 1 }).setData(safeData(chartData, 'bias_24'));
                             break;
                         }
                         case 'BBI': {
                             primary = chart.addLineSeries({ ...sopts, color: bbiConfig.bbi.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'bbi'));
-                            if (showBbiSignal) (primary as any).setMarkers(sortMarkers(calcBbiSignals(data)));
-                            chart.addLineSeries({ ...sopts, color: bbiConfig.close.color, lineWidth: 1 }).setData(safeData(data, 'close'));
+                            (primary as any).setData(safeData(chartData, 'bbi'));
+                            if (showBbiSignal) (primary as any).setMarkers(sortMarkers(calcBbiSignals(chartData)));
+                            chart.addLineSeries({ ...sopts, color: bbiConfig.close.color, lineWidth: 1 }).setData(safeData(chartData, 'close'));
                             break;
                         }
                         case 'CCI': {
                             primary = chart.addLineSeries({ ...sopts, color: cciConfig.cci.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'cci'));
-                            [-100, 100].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.5)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(data.map(d => ({ time: d.time, value: v }))));
+                            (primary as any).setData(safeData(chartData, 'cci'));
+                            [-100, 100].forEach(v => chart.addLineSeries({ ...sopts, color: 'rgba(145,55,76,0.5)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 }).setData(chartData.map(d => ({ time: d.time, value: v }))));
                             break;
                         }
                         case 'DPO': {
                             primary = chart.addLineSeries({ ...sopts, color: dpoConfig.dpo.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'dpo'));
-                            if (showDpoSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(data, 'dpo', 'madpo')));
-                            chart.addLineSeries({ ...sopts, color: dpoConfig.madpo.color, lineWidth: 1 }).setData(safeData(data, 'madpo'));
+                            (primary as any).setData(safeData(chartData, 'dpo'));
+                            if (showDpoSignal) (primary as any).setMarkers(sortMarkers(calcCrossSignals(chartData, 'dpo', 'madpo')));
+                            chart.addLineSeries({ ...sopts, color: dpoConfig.madpo.color, lineWidth: 1 }).setData(safeData(chartData, 'madpo'));
                             break;
                         }
                         case 'BOLL': {
                             const cs2 = chart.addCandlestickSeries({ upColor: '#ef5350', downColor: '#26a69a', borderVisible: false, wickUpColor: '#ef5350', wickDownColor: '#26a69a' });
-                            cs2.setData(data);
-                            chart.addLineSeries({ ...sopts, color: bollConfig.upper.color,  lineWidth: 1 }).setData(safeData(data, 'boll_upper'));
-                            chart.addLineSeries({ ...sopts, color: bollConfig.middle.color, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 }).setData(safeData(data, 'boll_middle'));
-                            chart.addLineSeries({ ...sopts, color: bollConfig.lower.color,  lineWidth: 1 }).setData(safeData(data, 'boll_lower'));
-                            chart.addLineSeries({ ...sopts, color: maConfig.ma5.color,  lineWidth: 1 }).setData(safeData(data, 'ma5'));
-                            chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(data, 'ma10'));
+                            cs2.setData(chartData);
+                            chart.addLineSeries({ ...sopts, color: bollConfig.upper.color,  lineWidth: 1 }).setData(safeData(chartData, 'boll_upper'));
+                            chart.addLineSeries({ ...sopts, color: bollConfig.middle.color, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 }).setData(safeData(chartData, 'boll_middle'));
+                            chart.addLineSeries({ ...sopts, color: bollConfig.lower.color,  lineWidth: 1 }).setData(safeData(chartData, 'boll_lower'));
+                            chart.addLineSeries({ ...sopts, color: maConfig.ma5.color,  lineWidth: 1 }).setData(safeData(chartData, 'ma5'));
+                            chart.addLineSeries({ ...sopts, color: maConfig.ma10.color, lineWidth: 1 }).setData(safeData(chartData, 'ma10'));
                             primary = cs2; break;
                         }
                         case 'LON': {
                             primary = chart.addLineSeries({ ...sopts, color: lonConfig.lon.color, lineWidth: 1 });
-                            (primary as any).setData(safeData(data, 'lon'));
-                            chart.addLineSeries({ ...sopts, color: lonConfig.lonma.color, lineWidth: 1 }).setData(safeData(data, 'lonma'));
+                            (primary as any).setData(safeData(chartData, 'lon'));
+                            chart.addLineSeries({ ...sopts, color: lonConfig.lonma.color, lineWidth: 1 }).setData(safeData(chartData, 'lonma'));
                             chart.addHistogramSeries({ priceFormat: { type: 'volume' }, ...sopts })
-                                 .setData(data.map(d => ({ time: d.time, value: d.lon, color: (d.lon||0) >= 0 ? '#ef5350' : '#26a69a' })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.lon, color: (d.lon||0) >= 0 ? '#ef5350' : '#26a69a' })));
                             break;
                         }
                         case 'TROC_S': {
                             // 零轴（最底层）
                             chart.addLineSeries({ ...sopts, color: trocConfig.zero, lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: 0 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: 0 })));
                             // 动态超卖线（绿虚）
                             chart.addLineSeries({ ...sopts, color: trocConfig.os, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
                             // 动态超买线（红虚）
                             chart.addLineSeries({ ...sopts, color: trocConfig.ob, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
                             // TRIX归一化趋势线（灰）
                             chart.addLineSeries({ ...sopts, color: trocConfig.trix.color, lineWidth: 1 })
-                                 .setData(safeData(data, 'troc_trix_s'));
+                                 .setData(safeData(chartData, 'troc_trix_s'));
                             // ADX线 + ADX=25 趋势/震荡分界参考线（白色点线）
                             chart.addLineSeries({ ...sopts, color: trocConfig.adx.color, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(safeData(data, 'troc_adx_s'));
+                                 .setData(safeData(chartData, 'troc_adx_s'));
                             chart.addLineSeries({ ...sopts, color: 'rgba(255,255,255,0.18)', lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: 25 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: 25 })));
                             // OSC_MA信号线（橙）
                             chart.addLineSeries({ ...sopts, color: trocConfig.oscMa.color, lineWidth: 1 })
-                                 .setData(safeData(data, 'troc_osc_ma'));
+                                 .setData(safeData(chartData, 'troc_osc_ma'));
                             // OSC主线（蓝，2px，最顶层）
                             primary = chart.addLineSeries({ ...sopts, color: trocConfig.osc.color, lineWidth: 2 });
-                            (primary as any).setData(safeData(data, 'troc_osc'));
+                            (primary as any).setData(safeData(chartData, 'troc_osc'));
                             // BUY/SELL 箭头标记（对齐 Python DISPLAY_CONFIG_SHORT markers）
-                            const buyMarkersS = data
+                            const buyMarkersS = chartData
                                 .filter(d => d.troc_buy_s != null)
                                 .map(d => ({ time: d.time, position: 'belowBar' as const, color: '#00E676', shape: 'arrowUp' as const, text: 'B' }));
-                            const sellMarkersS = data
+                            const sellMarkersS = chartData
                                 .filter(d => d.troc_sell_s != null)
                                 .map(d => ({ time: d.time, position: 'aboveBar' as const, color: '#FF1744', shape: 'arrowDown' as const, text: 'S' }));
                             (primary as any).setMarkers(sortMarkers([...buyMarkersS, ...sellMarkersS]));
@@ -980,36 +1014,36 @@ export function KlineChart({
                         case 'TROC_L': {
                             // 零轴
                             chart.addLineSeries({ ...sopts, color: trocConfig.zero, lineStyle: LightweightCharts.LineStyle.Dotted, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: 0 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: 0 })));
                             // 吸筹强度柱（浅绿，正向）
                             chart.addHistogramSeries({ ...sopts, color: trocConfig.acc })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_acc ?? 0 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_acc ?? 0 })));
                             // 派筹强度柱（浅红，负向，troc-math 已取负值）
                             chart.addHistogramSeries({ ...sopts, color: trocConfig.dist })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_dist ?? 0 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_dist ?? 0 })));
                             // 动态超卖线
                             chart.addLineSeries({ ...sopts, color: trocConfig.os, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_os_dyn ?? -1.5 })));
                             // 动态超买线
                             chart.addLineSeries({ ...sopts, color: trocConfig.ob, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: d.troc_ob_dyn ?? 1.5 })));
                             // PHASE状态线（±1.2缩放，在副图范围内可见）
                             chart.addLineSeries({ ...sopts, color: trocConfig.phase, lineStyle: LightweightCharts.LineStyle.Dashed, lineWidth: 1 })
-                                 .setData(data.map(d => ({ time: d.time, value: (d.troc_phase ?? 0) * 1.2 })));
+                                 .setData(chartData.map(d => ({ time: d.time, value: (d.troc_phase ?? 0) * 1.2 })));
                             // TRIX长期归一化（灰）
                             chart.addLineSeries({ ...sopts, color: trocConfig.trix.color, lineWidth: 1 })
-                                 .setData(safeData(data, 'troc_trix_l'));
+                                 .setData(safeData(chartData, 'troc_trix_l'));
                             // OSC_MA_L信号线（橙）
                             chart.addLineSeries({ ...sopts, color: trocConfig.oscMa.color, lineWidth: 1 })
-                                 .setData(safeData(data, 'troc_osc_ma_l'));
+                                 .setData(safeData(chartData, 'troc_osc_ma_l'));
                             // OSC_L主线（蓝，2px）
                             primary = chart.addLineSeries({ ...sopts, color: trocConfig.osc.color, lineWidth: 2 });
-                            (primary as any).setData(safeData(data, 'troc_osc_l'));
+                            (primary as any).setData(safeData(chartData, 'troc_osc_l'));
                             // BUY/SELL 箭头标记（对齐 Python DISPLAY_CONFIG_LONG markers，L=Long长线）
-                            const buyMarkersL = data
+                            const buyMarkersL = chartData
                                 .filter(d => d.troc_buy_l != null)
                                 .map(d => ({ time: d.time, position: 'belowBar' as const, color: '#00E676', shape: 'arrowUp' as const, text: 'L' }));
-                            const sellMarkersL = data
+                            const sellMarkersL = chartData
                                 .filter(d => d.troc_sell_l != null)
                                 .map(d => ({ time: d.time, position: 'aboveBar' as const, color: '#FF1744', shape: 'arrowDown' as const, text: 'S' }));
                             (primary as any).setMarkers(sortMarkers([...buyMarkersL, ...sellMarkersL]));
@@ -1059,8 +1093,8 @@ export function KlineChart({
 
                         const newId = requestAnimationFrame(() => {
                             if (!param.point || !param.time) {
-                                if (data.length) {
-                                    legendDataRef.current = data[data.length - 1];
+                                if (chartData.length) {
+                                    legendDataRef.current = chartData[chartData.length - 1];
                                     updateLegendUIs.current.forEach(cb => cb());
                                 }
                                 lastLegendTimeRef.current = null;
@@ -1122,18 +1156,18 @@ export function KlineChart({
                         requestAnimationFrame(() => {
                             if (!disposed && targetTimeRef.current) {
                                 // 定位滚动
-                                scrollToTargetTime(mainChart, data, targetTimeRef.current, period);
+                                scrollToTargetTime(mainChart, chartData, targetTimeRef.current, period);
                                 // 绘制金色箭头（在图表初始化完成后立即画，避免 Effect 时序问题）
                                 const dateStr   = targetTimeRef.current.slice(0, 10);
                                 const isDayPlus = period === '1d' || period === '1w' || period === '1M';
                                 let   targetBar: FormattedChartData | undefined;
                                 if (isDayPlus) {
-                                    targetBar = data.find(d => String(d.time).slice(0, 10) === dateStr);
+                                    targetBar = chartData.find(d => String(d.time).slice(0, 10) === dateStr);
                                 } else {
                                     const isoStr  = targetTimeRef.current.replace(' ', 'T') + (targetTimeRef.current.includes('+') ? '' : '+08:00');
                                     const ts      = Math.floor(new Date(isoStr).getTime() / 1000);
-                                    targetBar = data.find(d => d.time === ts);
-                                    if (!targetBar) targetBar = data.find(d => {
+                                    targetBar = chartData.find(d => d.time === ts);
+                                    if (!targetBar) targetBar = chartData.find(d => {
                                         const t = typeof d.time === 'number'
                                             ? new Date((d.time as number) * 1000).toISOString().slice(0, 10)
                                             : String(d.time).slice(0, 10);
@@ -1170,42 +1204,48 @@ export function KlineChart({
             if (ro) ro.disconnect();
             allCharts.forEach(c => c.remove());
         };
-    }, [data, period, indicatorPanes]); // 去除了 visibleMAs 和 showDivergence 等状态
+    // ★ 核心修复：只监听 chartReadyKey（数据就绪信号）和布局参数
+    //   data 数组引用每次都变→会触发不必要的 cleanup/重建；
+    //   loading 进入 dep 在旧 WebView 下引发 cleanup→重建竞态。
+    //   chartDataRef.current 保证渲染时读到最新数据，无需 data 进 dep。
+    }, [chartReadyKey, period, indicatorPanes]);
 
     // ★ 新增 useEffect：targetTime 变化时（图表已渲染），重新执行定位
     // 场景：同品种点击了不同信号行，targetTime 变化但图表不重建
     useEffect(() => {
-        if (!targetTime || !mainChartRef.current || !data.length) return;
+        const cd = chartDataRef.current;
+        if (!targetTime || !mainChartRef.current || !cd.length) return;
         const timer = setTimeout(() => {
-            if (mainChartRef.current && data.length) {
-                scrollToTargetTime(mainChartRef.current, data, targetTime, period);
+            if (mainChartRef.current && chartDataRef.current.length) {
+                scrollToTargetTime(mainChartRef.current, chartDataRef.current, targetTime, period);
             }
         }, 150);
         return () => clearTimeout(timer);
-    }, [targetTime, data, period]);
+    }, [targetTime, chartReadyKey, period]);
 
     // ★ targetTime 变化时（图表已存在，如同品种换信号行）：重新定位 + 更新箭头
     useEffect(() => {
         const candle = seriesRefs.current.candle;
         const base   = baseMarkersRef.current;
+        const cd     = chartDataRef.current;
 
         if (!targetTime) {
-            if (candle && data.length) candle.setMarkers(base);
+            if (candle && cd.length) candle.setMarkers(base);
             return;
         }
-        if (!data.length || !candle) return;
+        if (!cd.length || !candle) return;
 
         const dateStr   = targetTime.slice(0, 10);
         const isDayPlus = period === '1d' || period === '1w' || period === '1M';
         let   targetBar: FormattedChartData | undefined;
 
         if (isDayPlus) {
-            targetBar = data.find(d => String(d.time).slice(0, 10) === dateStr);
+            targetBar = cd.find(d => String(d.time).slice(0, 10) === dateStr);
         } else {
             const isoStr  = targetTime.replace(' ', 'T') + (targetTime.includes('+') ? '' : '+08:00');
             const ts      = Math.floor(new Date(isoStr).getTime() / 1000);
-            targetBar = data.find(d => d.time === ts);
-            if (!targetBar) targetBar = data.find(d => {
+            targetBar = cd.find(d => d.time === ts);
+            if (!targetBar) targetBar = cd.find(d => {
                 const t = typeof d.time === 'number'
                     ? new Date((d.time as number) * 1000).toISOString().slice(0, 10)
                     : String(d.time).slice(0, 10);
@@ -1226,11 +1266,11 @@ export function KlineChart({
 
         // 重新定位滚动
         const timer = setTimeout(() => {
-            if (mainChartRef.current && data.length)
-                scrollToTargetTime(mainChartRef.current, data, targetTime, period);
+            if (mainChartRef.current && chartDataRef.current.length)
+                scrollToTargetTime(mainChartRef.current, chartDataRef.current, targetTime, period);
         }, 150);
         return () => clearTimeout(timer);
-    }, [targetTime, data, period]);
+    }, [targetTime, chartReadyKey, period]);
 
     // 3. 动态控制均线可见性 (极速响应)
     useEffect(() => {
@@ -1245,31 +1285,33 @@ export function KlineChart({
     // 4. 动态控制背离信号和指标信号 (增量更新 Markers)
     useEffect(() => {
         const candle = seriesRefs.current.candle;
-        if (candle && data.length) {
+        const cd = chartDataRef.current;
+        if (candle && cd.length) {
             // ★ 存入 ref，供箭头 effect 合并
             baseMarkersRef.current = showDivergence
-                ? sortMarkers(calcMacdDivergence(data))
+                ? sortMarkers(calcMacdDivergence(cd))
                 : [];
             // 若无跳转目标，直接应用基础 markers
             if (!targetTimeRef.current) {
                 candle.setMarkers(baseMarkersRef.current);
             }
         }
-    }, [showDivergence, data]);
+    }, [showDivergence, chartReadyKey]);
 
     useEffect(() => {
         const inds = seriesRefs.current.indicators;
-        if (!data.length) return;
+        const cd = chartDataRef.current;
+        if (!cd.length) return;
         if (inds['TRIX']) {
-            inds['TRIX'].setMarkers(showTrixSignal ? sortMarkers(calcCrossSignals(data, 'trix', 'trma')) : []);
+            inds['TRIX'].setMarkers(showTrixSignal ? sortMarkers(calcCrossSignals(cd, 'trix', 'trma')) : []);
         }
         if (inds['BBI']) {
-            inds['BBI'].setMarkers(showBbiSignal ? sortMarkers(calcBbiSignals(data)) : []);
+            inds['BBI'].setMarkers(showBbiSignal ? sortMarkers(calcBbiSignals(cd)) : []);
         }
         if (inds['DPO']) {
-            inds['DPO'].setMarkers(showDpoSignal ? sortMarkers(calcCrossSignals(data, 'dpo', 'madpo')) : []);
+            inds['DPO'].setMarkers(showDpoSignal ? sortMarkers(calcCrossSignals(cd, 'dpo', 'madpo')) : []);
         }
-    }, [showTrixSignal, showBbiSignal, showDpoSignal, data]);
+    }, [showTrixSignal, showBbiSignal, showDpoSignal, chartReadyKey]);
 
     // ─── Render ────────────────────────────────────────────────────
     if (loading) return <Skeleton className="h-full w-full bg-transparent" />;
@@ -1387,5 +1429,7 @@ export function KlineChart({
         </div>
     );
 }
+
+
 
 

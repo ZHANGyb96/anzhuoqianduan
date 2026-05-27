@@ -6,6 +6,11 @@
  * 修复：
  *  1. 定位问题 — 通过 targetTime prop 传给 KlineChart，数据就绪后滚动到指定K线
  *  2. 返回键无响应 — 使用 router.back()，Capacitor 无历史时 fallback 到 backtest 页
+ *  3. [新增] 周期自动匹配 — 切换品种时检测本地有哪些周期有数据，
+ *           如果当前周期无数据则按优先级自动切换（1d > 60m > 30m > 15m > 5m > …）；
+ *           周期栏中无数据的按钮置灰，防止用户误点。
+ *           根本原因：重装 App 后 SQLite 清空，用户重新同步时可能只同步了部分周期，
+ *           但图表默认显示 '1d'，若未同步日线则显示"暂无数据"空页面。
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react';
@@ -30,6 +35,8 @@ import type { FormattedChartData } from '@/components/kline-chart';
 import { useAIStore } from '@/store/useAIStore';
 import { useChartNavStore } from '@/store/useChartNavigationStore';
 import { Badge } from '@/components/ui/badge';
+// [新增] 用于查询本地数据库的可用周期
+import { getMobileDB } from '@/lib/mobile-db';
 
 const KlineChart = dynamic(
   () => import('@/components/kline-chart').then(m => m.KlineChart),
@@ -49,6 +56,31 @@ const PERIOD_TABS = [
   { value: '1M',   label: '月K'  },
 ];
 
+/**
+ * 切换品种时自动选择的周期优先级顺序。
+ * 逻辑：先日线（最常用），再从长到短的分钟线，最后周/月线。
+ */
+const PERIOD_PRIORITY = ['1d', '60m', '30m', '15m', '5m', '1m', '120m', '240m', '1w', '1M'];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [新增] 查询某只股票在本地 SQLite 中有哪些周期有数据
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchAvailablePeriods(stockCode: string): Promise<string[]> {
+  if (!isCapacitor || !stockCode) return [];
+  try {
+    const db  = await getMobileDB();
+    const res = await db.query(
+      'SELECT DISTINCT period FROM kline_metrics WHERE stock_code = ? ORDER BY period',
+      [stockCode],
+    );
+    return (res.values ?? []).map((r: any) => r.period as string).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function ChartView() {
   const router = useRouter();
   const [isClient,       setIsClient      ] = useState(false);
@@ -62,6 +94,9 @@ export default function ChartView() {
   // ── 导航目标（来自信号明细点击）────────────────────────────────────────
   const { target, clearTarget } = useChartNavStore();
   const navAppliedRef = useRef(false);
+
+  // [新增] 当前品种在本地 SQLite 中有数据的周期列表
+  const [availablePeriods, setAvailablePeriods] = useState<string[]>([]);
 
   useEffect(() => { setIsClient(true); }, []);
 
@@ -92,6 +127,31 @@ export default function ChartView() {
       navAppliedRef.current = true;
     }
   }, [target]); // eslint-disable-line
+
+  // ────────────────────────────────────────────────────────────────────────
+  // [新增] 品种切换时：查询该品种在本地库中有数据的周期，
+  //         如果当前 selectedPeriod 没有数据，按优先级自动切换。
+  // ────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedStock) {
+      setAvailablePeriods([]);
+      return;
+    }
+
+    // Web 环境（非 Capacitor）不使用本地 DB，直接放行
+    if (!isCapacitor) return;
+
+    fetchAvailablePeriods(selectedStock).then(periods => {
+      setAvailablePeriods(periods);
+
+      // 如果有数据但当前选中的周期没有数据，按优先级自动切换
+      if (periods.length > 0 && !periods.includes(selectedPeriod)) {
+        const best = PERIOD_PRIORITY.find(p => periods.includes(p)) ?? periods[0];
+        setSelectedPeriod(best);
+      }
+    });
+  }, [selectedStock]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 注意：intentionally 不依赖 selectedPeriod，避免循环触发
 
   // 切换周期时把对应 Tab 滚动到可视区
   useEffect(() => {
@@ -164,7 +224,6 @@ export default function ChartView() {
     if (typeof window !== 'undefined' && window.history.length > 1) {
       router.back();
     } else {
-      // 在 Capacitor 中 history 可能为 1，直接跳回回测页
       router.replace('/dashboard/backtest');
     }
   }, [clearTarget, router]);
@@ -192,13 +251,16 @@ export default function ChartView() {
   const targetTime =
     target && target.stockCode === selectedStock ? target.time : undefined;
 
+  // [新增] 周期是否有本地数据（Web 环境不做限制）
+  const periodHasData = (period: string) =>
+    !isCapacitor || availablePeriods.length === 0 || availablePeriods.includes(period);
+
   return (
     <div className="flex flex-col w-full flex-1 min-h-0 bg-background overflow-hidden">
 
       {/* ─── 返回条：从信号明细跳转时显示 ─────────────────────────────────── */}
       {target && (
         <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/20 flex-shrink-0">
-          {/* ← 返回 按钮 — 主要交互 */}
           <button
             onClick={handleBack}
             className="flex items-center gap-1 text-xs font-semibold text-primary
@@ -268,12 +330,6 @@ export default function ChartView() {
 
       {/* ─── K 线图主体 ──────────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 flex flex-col w-full overflow-hidden">
-        {/*
-          targetTime 通过 spread 方式传入，避免 KlineChart 未声明时产生 TS 编译错误。
-          请同步在 src/components/kline-chart.tsx 中添加：
-            targetTime?: string;
-          并在数据加载完成后根据该值滚动到对应K线（见 kline-chart-PATCH说明.ts）。
-        */}
         <KlineChart
           stockCode={selectedStock}
           period={selectedPeriod}
@@ -294,20 +350,37 @@ export default function ChartView() {
                 className="flex items-center flex-1 min-w-0 overflow-x-auto no-scrollbar scroll-smooth h-full space-x-1"
                 style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' } as React.CSSProperties}
               >
-                {PERIOD_TABS.map(p => (
-                  <button
-                    key={p.value}
-                    data-period={p.value}
-                    onClick={() => setSelectedPeriod(p.value)}
-                    className={`shrink-0 px-3 h-full relative text-[13px] transition-colors whitespace-nowrap flex items-center justify-center bg-transparent border-none appearance-none outline-none
-                      ${selectedPeriod === p.value ? 'text-[#5A87F7] font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
-                  >
-                    {p.label}
-                    {selectedPeriod === p.value && (
-                      <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-6 h-0.5 bg-[#5A87F7] rounded-full" />
-                    )}
-                  </button>
-                ))}
+                {PERIOD_TABS.map(p => {
+                  const hasData   = periodHasData(p.value);
+                  const isActive  = selectedPeriod === p.value;
+                  return (
+                    <button
+                      key={p.value}
+                      data-period={p.value}
+                      onClick={() => setSelectedPeriod(p.value)}
+                      title={!hasData ? `${p.label} 暂无本地数据，请先在"数据管理"同步` : undefined}
+                      className={[
+                        'shrink-0 px-3 h-full relative text-[13px] transition-colors whitespace-nowrap',
+                        'flex items-center justify-center bg-transparent border-none appearance-none outline-none',
+                        isActive
+                          ? 'text-[#5A87F7] font-semibold'
+                          : hasData
+                            ? 'text-muted-foreground hover:text-foreground'
+                            : 'text-muted-foreground/30 cursor-not-allowed',  // 无数据：置灰
+                      ].join(' ')}
+                    >
+                      {p.label}
+                      {/* 当前选中的下划线 */}
+                      {isActive && (
+                        <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-6 h-0.5 bg-[#5A87F7] rounded-full" />
+                      )}
+                      {/* [新增] 无数据的小圆点提示 */}
+                      {!hasData && isCapacitor && availablePeriods.length > 0 && (
+                        <div className="absolute top-1 right-1 w-1 h-1 rounded-full bg-muted-foreground/30" />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
 
               {/* AI 按钮 */}
